@@ -229,3 +229,17 @@ def test_fetch_metrics_can_skip_the_console(client, monkeypatch):
     assert "cpu_temp" not in m and m["model"] == "Qwen3.5-9B-Q6_K"
     m = client.fetch_metrics(console_ready=True, app_running=True, scrape_console=True)
     assert m["cpu_temp"] == 45
+
+
+def test_standby_explains_a_remote_play_in_use_refusal(client, monkeypatch):
+    monkeypatch.setattr(client, "state", lambda: "ready")
+    monkeypatch.setattr(ps5client, "goto_bed", lambda *a, **k: str(ps5client.SessionRefused(0x80108B10)))
+    with pytest.raises(PS5Error) as err:
+        client.standby()
+    assert "in use" in str(err.value) and "chiaki-ng" in str(err.value)
+
+
+def test_standby_does_nothing_when_the_console_is_not_awake(client, monkeypatch):
+    monkeypatch.setattr(client, "state", lambda: "standby")
+    monkeypatch.setattr(ps5client, "goto_bed", lambda *a, **k: pytest.fail("must not be called"))
+    client.standby()

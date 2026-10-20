@@ -75,6 +75,7 @@ STEP_LABELS = {
     "waiting for the ready URL": "Loading the model",
     "app already running": "PS5LM already running",
 }
+FAILURE_SHOWN_FOR = 300  # seconds a failed start or stop stays in the Status sensor
 REFRESH_ON = {"console awake", "app launched", "signed in via Remote Play", "done"}
 
 
@@ -95,6 +96,7 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
         self.pending: str | None = None  # console_on, console_off, app_on, app_off while an operation runs
         self.step: str = ""
         self.last_result: str | None = None
+        self.failure: tuple[str, float] | None = None  # (reason, when) of the last failed operation, shown in Status for a while
 
     async def _async_update_data(self) -> dict:
         state = await self.hass.async_add_executor_job(self.client.state)
@@ -121,6 +123,8 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
     def status(self) -> str:
         if self.pending:
             return self.step or "Working"
+        if self.failure and time.monotonic() - self.failure[1] < FAILURE_SHOWN_FOR:
+            return f"Failed: {self.failure[0]}"[:255]
         data = self.data or {}
         console = data.get("console")
         if console == "standby":
@@ -166,12 +170,14 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
             raise HomeAssistantError("another PS5 operation is still running")
         async with self.op_lock:
             started = time.monotonic()
+            self.failure = None
             self.pending, self.step = name, first_step
             self.async_update_listeners()
             try:
                 result = await work()
             except PS5Error as err:
                 self.last_result = f"failed: {err}"
+                self.failure = (str(err), time.monotonic())
                 raise HomeAssistantError(str(err)) from err
             else:
                 self.last_result = f"ok in {time.monotonic() - started:.0f} s"

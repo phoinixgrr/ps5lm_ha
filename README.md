@@ -219,7 +219,7 @@ Stops PS5LM if the hottest SoC sensor stays above 85 °C, and tells you.
 ## Notes
 
 - Tested with PS5LM v0.9.1, websrv v0.34 and ps5-exporter v0.2.0 on a CFI-1216A, Home Assistant 2026.10
-- Rest mode is refused while another Remote Play session is open or still closing; the integration retries for up to 90 s
+- The console handles one Remote Play session at a time. While chiaki-ng, the PS Remote Play app or a previous session is connected, rest mode (and the sign-in after a wake) is refused; the integration retries for up to 90 s and then shows "Failed: Remote Play is in use" in the Status sensor for 5 minutes. Close the other app and try again.
 - Reading the console metrics makes the console stall the model for a few seconds (the exporter walks the whole process table), so they are read only every 2 minutes and never while a request is running. Lowering the interval makes answers stutter.
 - A full power-off ends the jailbreak; etaHEN and websrv then have to be loaded again by hand
 - websrv and the PS5LM API have no authentication. Keep the console on a trusted network.

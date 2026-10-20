@@ -429,7 +429,8 @@ class PS5Client:
             return
         result = goto_bed(self.host, self.regist_key, self.morning)
         if " 200" not in result:
-            raise PS5Error(f"could not send the console to rest mode: {result}")
+            hint = " (close chiaki-ng or the PS Remote Play app and try again)" if "in use" in result else ""
+            raise PS5Error(f"could not send the console to rest mode: {result}{hint}")
         self._wait(lambda: self.state() != "ready", 40, step=2.0)  # it answers for a few more seconds
 
     def _wake_until_ready(self, limit: float = 120) -> bool:
