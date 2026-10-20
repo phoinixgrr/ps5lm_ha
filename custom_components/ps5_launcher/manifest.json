@@ -1,0 +1,14 @@
+{
+  "domain": "ps5_launcher",
+  "name": "PS5LM",
+  "codeowners": [
+    "@phoinixgrr"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/phoinixgrr/ps5lm_ha",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/phoinixgrr/ps5lm_ha/issues",
+  "requirements": [],
+  "version": "0.2.0"
+}

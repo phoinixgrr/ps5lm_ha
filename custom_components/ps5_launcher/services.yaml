@@ -1,0 +1,49 @@
+wake:
+  name: Wake the console
+  description: Wake the PS5 from rest mode without starting PS5LM.
+  fields:
+    config_entry_id: &entry
+      name: Config entry
+      description: Only needed when more than one PS5 is configured.
+      selector:
+        config_entry:
+          integration: ps5_launcher
+    wait:
+      name: Wait
+      description: Return only when the console is awake.
+      default: false
+      selector:
+        boolean:
+standby:
+  name: Console to rest mode
+  description: Put the PS5 in rest mode. This also stops PS5LM.
+  fields:
+    config_entry_id: *entry
+start_app:
+  name: Start PS5LM
+  description: Wake the console if needed, sign in, start PS5LM and optionally wait until the model is loaded.
+  fields:
+    config_entry_id: *entry
+    title_id:
+      name: PS5LM title ID
+      description: Title ID of PS5LM (PPSA99575 for the official build, PPSA99581 for PS5LM Plus). Defaults to the configured one.
+      example: PPSA99575
+      selector:
+        text:
+    ready_url:
+      name: PS5LM health URL
+      description: Wait until this URL answers 200, for example http://192.168.1.50:8081/health.
+      example: http://192.168.1.50:8081/health
+      selector:
+        text:
+    wait:
+      name: Wait
+      description: Return only when the sequence has finished (can take a few minutes).
+      default: false
+      selector:
+        boolean:
+stop_app:
+  name: Stop PS5LM
+  description: Stop PS5LM. The console stays on.
+  fields:
+    config_entry_id: *entry

@@ -1,0 +1,69 @@
+name: Release on Tag Push
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "v*.*.*-dev*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract Tag Name
+        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Set manifest version from tag
+        run: |
+          set -euo pipefail
+          VER="${TAG_NAME#v}"
+          VER="$VER" python - <<'PY'
+          import json, os
+          path = "custom_components/ps5_launcher/manifest.json"
+          ver  = os.environ["VER"]
+          with open(path, "r", encoding="utf-8") as f:
+              data = json.load(f)
+          data["version"] = ver
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          print("Updated manifest.json version to", ver)
+          PY
+
+      - name: Create release zip
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          ZIP="$GITHUB_WORKSPACE/dist/ps5_launcher.zip"
+
+          cd "$GITHUB_WORKSPACE/custom_components/ps5_launcher"
+          zip -r "$ZIP" .
+
+          echo "ASSET_PATH=dist/ps5_launcher.zip" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release (upload zip)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "${TAG_NAME}" == *-dev* ]]; then
+            gh release create "${TAG_NAME}" \
+              --generate-notes \
+              --title "Release ${TAG_NAME}" \
+              --prerelease \
+              --repo "${GITHUB_REPOSITORY}" \
+              "${ASSET_PATH}"
+          else
+            gh release create "${TAG_NAME}" \
+              --generate-notes \
+              --title "Release ${TAG_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              "${ASSET_PATH}"
+          fi

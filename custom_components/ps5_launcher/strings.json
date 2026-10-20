@@ -1,0 +1,59 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "PS5LM",
+        "description": "Starts and stops PS5LM on a jailbroken PS5 on demand. The console needs ps5-payload-websrv running and Remote Play registration (the keys chiaki-ng stores as rp_regist_key and rp_key).",
+        "data": {
+          "host": "PS5 host name or IP address",
+          "regist_key": "Remote Play regist key (hex)",
+          "morning": "Remote Play morning key (32 hex characters)"
+        }
+      },
+      "settings": {
+        "title": "PS5LM settings",
+        "description": "Defaults are filled in; change them only if your setup differs.",
+        "data": {
+          "title_id": "PS5LM title ID (PPSA99575 official, PPSA99581 Plus)",
+          "api_url": "PS5LM API URL (health, metrics and model info are read from here)",
+          "web_port": "websrv port (launching PS5LM)",
+          "exporter_port": "ps5-exporter port (console metrics)",
+          "scan_interval": "Update interval",
+          "llm_metrics": "Read model server metrics (speed, requests, tokens)",
+          "console_metrics": "Read console metrics (temperatures, fan, memory, storage)",
+          "console_interval": "Console metrics interval (each read stalls the model for a few seconds, so keep it rare)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "The console did not answer on the discovery port. It must be in rest mode or on.",
+      "invalid_credentials": "The regist key must be hex (up to 16 characters) and the morning key 32 hex characters."
+    },
+    "abort": {
+      "already_configured": "This console is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "PS5LM",
+        "description": "The keys are the ones chiaki-ng stores for this console (rp_regist_key and rp_key).",
+        "data": {
+          "title_id": "PS5LM title ID (PPSA99575 official, PPSA99581 Plus)",
+          "api_url": "PS5LM API URL (health, metrics and model info are read from here)",
+          "web_port": "websrv port (launching PS5LM)",
+          "exporter_port": "ps5-exporter port (console metrics)",
+          "scan_interval": "Update interval",
+          "llm_metrics": "Read model server metrics (speed, requests, tokens)",
+          "console_metrics": "Read console metrics (temperatures, fan, memory, storage)",
+          "regist_key": "Remote Play regist key (hex)",
+          "morning": "Remote Play morning key (32 hex characters)",
+          "console_interval": "Console metrics interval (each read stalls the model for a few seconds, so keep it rare)"
+        }
+      }
+    },
+    "error": {
+      "invalid_credentials": "The regist key must be hex (up to 16 characters) and the morning key 32 hex characters."
+    }
+  }
+}

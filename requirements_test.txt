@@ -1,0 +1,7 @@
+# Test dependencies for ps5lm_ha
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-cov>=5.0.0
+
+# Home Assistant (brings cryptography and voluptuous, the only libraries the integration uses)
+homeassistant>=2026.1.0
