@@ -537,3 +537,101 @@ class PS5Client:
         timings["total"] = time.monotonic() - t_start
         say("done")
         return timings
+
+    # -- model selection ------------------------------------------------------------------------------------------------
+    def list_models(self) -> list[str]:
+        """List the model files available on the console (excluding mmproj files).
+        
+        Returns a list of model names (without .gguf extension) from GET /fs/data/PS5LM/models/?fmt=json.
+        """
+        data = self._get_text(f"http://{self.host}:{self.web_port}/fs/data/PS5LM/models/?fmt=json")
+        if not data:
+            return []
+        try:
+            entries = json.loads(data)
+            return [os.path.basename(e.get("name", "")).removesuffix(".gguf") for e in entries if "mmproj" not in e.get("name", "").lower()]
+        except (ValueError, TypeError):
+            return []
+
+    def read_console_file(self, path: str) -> str | None:
+        """Read a file from the console via websrv.
+        
+        Args:
+            path: The file path on the console (e.g., /data/PS5LM/app-args.txt)
+            
+        Returns:
+            The file contents as a string, or None if the file doesn't exist or can't be read.
+        """
+        return self._get_text(f"http://{self.host}:{self.web_port}/fs{path}")
+
+    def write_console_file(self, path: str, content: str) -> bool:
+        """Write a file to the console via the /tools endpoint.
+        
+        Args:
+            path: The file path on the console
+            content: The file contents
+            
+        Returns:
+            True if the write succeeded, False otherwise.
+        """
+        try:
+            payload = json.dumps({"tool": "write_file", "params": {"path": path, "content": content}})
+            sock = socket.create_connection((self.host, self.web_port), timeout=10)
+            try:
+                # POST with JSON body
+                request = f"POST /tools HTTP/1.1\r\nHost: {self.host}:{self.web_port}\r\n" \
+                          f"Content-Type: application/json\r\n" \
+                          f"Content-Length: {len(payload)}\r\n" \
+                          f"Connection: close\r\n\r\n{payload}"
+                sock.sendall(request.encode())
+                status, headers, _ = _recv_headers(sock)
+                return " 200" in status
+            finally:
+                sock.close()
+        except Exception:
+            _LOGGER.exception("Failed to write file to console")
+            return False
+
+    def build_app_args_for_model(self, model_name: str, current_app_args: str | None = None) -> str:
+        """Build the app-args.txt content for a given model.
+        
+        Args:
+            model_name: The model file name (with .gguf extension)
+            current_app_args: Optional current app-args.txt content to use as base
+            
+        Returns:
+            The app-args.txt content as a string.
+        """
+        # Check if a profile exists for this model
+        profile_path = f"/data/PS5LM/profiles/{model_name}.args"
+        profile_content = self.read_console_file(profile_path)
+        
+        if profile_content:
+            return profile_content
+        
+        # Build from current app-args or defaults
+        if current_app_args:
+            lines = current_app_args.splitlines()
+        else:
+            lines = []
+        
+        # Find and replace the model path
+        new_lines = []
+        model_path = f"/data/PS5LM/models/{model_name}.gguf"
+        for line in lines:
+            if line.strip().startswith("-m"):
+                new_lines.append(f"-m {model_path}")
+            elif line.strip().startswith("-c"):
+                new_lines.append("-c 8192")
+            elif line.strip().startswith("-ctk"):
+                new_lines.append("-ctk q4_0")
+            elif line.strip().startswith("-ctv"):
+                new_lines.append("-ctv q4_0")
+            elif line.strip().startswith("-ctxcp"):
+                new_lines.append("-ctxcp 8")
+            elif line.strip().startswith("--tools"):
+                new_lines.append("--tools")
+            else:
+                new_lines.append(line)
+        
+        return "\n".join(new_lines)

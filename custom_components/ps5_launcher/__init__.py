@@ -52,7 +52,7 @@ CONSOLE_KEYS = ("cpu_temp", "soc_temp_max", "fan_pct", "uptime_s", "app_memory",
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SWITCH, Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS = [Platform.SWITCH, Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SELECT]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 

@@ -243,3 +243,103 @@ def test_standby_does_nothing_when_the_console_is_not_awake(client, monkeypatch)
     monkeypatch.setattr(client, "state", lambda: "standby")
     monkeypatch.setattr(ps5client, "goto_bed", lambda *a, **k: pytest.fail("must not be called"))
     client.standby()
+
+
+# -- model selection ---------------------------------------------------------------------------------------------------
+def test_list_models_returns_model_names(client, monkeypatch):
+    """Test that list_models returns model names without mmproj files."""
+    models_json = '''[
+        {"name": "/data/PS5LM/models/Qwen3.5-9B-Q6_K.gguf"},
+        {"name": "/data/PS5LM/models/Qwen3-14B-Q4_K_M.gguf"},
+        {"name": "/data/PS5LM/models/gemma-4-12b-it-Q5_K_M.gguf"},
+        {"name": "/data/PS5LM/models/vision-mmproj-f16.gguf"}
+    ]'''
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: models_json if "/models/" in url else None)
+    models = client.list_models()
+    assert models == ["Qwen3.5-9B-Q6_K", "Qwen3-14B-Q4_K_M", "gemma-4-12b-it-Q5_K_M"]
+    assert "vision-mmproj-f16" not in models
+
+
+def test_list_models_empty_or_invalid(client, monkeypatch):
+    """Test that list_models handles empty or invalid responses."""
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: "invalid json" if "/models/" in url else None)
+    models = client.list_models()
+    assert models == []
+    
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: None)
+    models = client.list_models()
+    assert models == []
+
+
+def test_read_console_file(client, monkeypatch):
+    """Test reading a file from the console."""
+    content = "test content\nline 2"
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: content if "/app-args.txt" in url else None)
+    result = client.read_console_file("/data/PS5LM/app-args.txt")
+    assert result == content
+
+
+def test_read_console_file_not_found(client, monkeypatch):
+    """Test reading a file that doesn't exist."""
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: None)
+    result = client.read_console_file("/data/PS5LM/nonexistent.txt")
+    assert result is None
+
+
+def test_write_console_file_succeeds(client, monkeypatch):
+    """Test writing a file to the console."""
+    content = "new content"
+    # Mock _recv_headers in ps5client module
+    monkeypatch.setattr(ps5client, "_recv_headers", lambda sock, timeout=8.0: (b"HTTP/1.1 200 OK", {}, b""))
+    result = client.write_console_file("/data/PS5LM/test.txt", content)
+    assert result is True
+
+
+def test_write_console_file_fails(client, monkeypatch):
+    """Test writing a file that fails."""
+    monkeypatch.setattr(ps5client, "_recv_headers", lambda sock, timeout=8.0: (b"HTTP/1.1 400 Bad Request", {}, b""))
+    result = client.write_console_file("/data/PS5LM/test.txt", "content")
+    assert result is False
+
+
+def test_build_app_args_from_profile(client, monkeypatch):
+    """Test that build_app_args_for_model uses profile when available."""
+    profile_content = """-m /data/PS5LM/models/Qwen3.5-9B-Q6_K.gguf
+-c 65536
+-ctk q8_0
+-ctv q8_0
+--tools"""
+    monkeypatch.setattr(client, "read_console_file", lambda path: profile_content if "profiles/" in path else None)
+    result = client.build_app_args_for_model("Qwen3.5-9B-Q6_K.gguf")
+    assert result == profile_content
+
+
+def test_build_app_args_fallback(client, monkeypatch):
+    """Test that build_app_args_for_model creates fallback args when no profile exists."""
+    current_args = """-m /data/PS5LM/models/old_model.gguf
+-c 65536
+-ctk q8_0
+-ctv q8_0
+--tools read_file"""
+    # Mock read_console_file to return current args for non-profile paths
+    def mock_read(path):
+        if "profiles/" in path:
+            return None
+        return current_args
+    
+    monkeypatch.setattr(client, "read_console_file", mock_read)
+    result = client.build_app_args_for_model("new_model.gguf")
+    assert "-m /data/PS5LM/models/new_model.gguf" in result
+    assert "-c 8192" in result
+    assert "-ctk q4_0" in result
+    assert "-ctv q4_0" in result
+    assert "-ctxcp 8" in result
+    assert "--tools" in result
+    assert "old_model" not in result
+
+
+def test_build_app_args_no_current(client):
+    """Test that build_app_args_for_model works with no current args."""
+    result = client.build_app_args_for_model("test_model.gguf", None)
+    assert "-m /data/PS5LM/models/test_model.gguf" in result
+    assert "-c 8192" in result
