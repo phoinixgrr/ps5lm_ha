@@ -56,8 +56,8 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
     @property
     def options(self) -> list[str]:
         current = self.current_option
-        if current and current not in self._model_list:
-            return [current, *self._model_list]
+        if current and current not in self._model_list:  # a model that is loaded but no longer in the folder
+            return sorted([current, *self._model_list], key=str.lower)
         return self._model_list
 
     @property

@@ -256,7 +256,7 @@ def test_list_models_returns_model_names(client, monkeypatch):
     ]'''
     monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: models_json if "/models/" in url else None)
     models = client.list_models()
-    assert models == ["Qwen3.5-9B-Q6_K", "Qwen3-14B-Q4_K_M", "gemma-4-12b-it-Q5_K_M"]
+    assert models == ["gemma-4-12b-it-Q5_K_M", "Qwen3-14B-Q4_K_M", "Qwen3.5-9B-Q6_K"]  # A to Z, ignoring case
     assert "vision-mmproj-f16" not in models
 
 
@@ -462,3 +462,10 @@ def test_build_app_args_with_nothing_to_start_from(client, monkeypatch):
     assert pairs["-c"] == "8192"
     assert pairs["--port"] == "8081"
     assert "--metrics" in client.build_app_args_for_model("test_model.gguf", None).splitlines()
+
+
+def test_list_models_is_sorted_ignoring_case(client, monkeypatch):
+    """A dropdown is easier to read A to Z, and case must not push every lowercase name to the end."""
+    listing = '[{"name": "zephyr.gguf"}, {"name": "Qwen3-14B.gguf"}, {"name": "gemma-4.gguf"}, {"name": "Alpha.gguf"}]'
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: listing if "/models/" in url else None)
+    assert client.list_models() == ["Alpha", "gemma-4", "Qwen3-14B", "zephyr"]

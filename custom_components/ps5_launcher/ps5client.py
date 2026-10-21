@@ -560,7 +560,7 @@ class PS5Client:
 
     # -- models ------------------------------------------------------------------------------------------------------
     def list_models(self) -> list[str]:
-        """The models on the console, newest listing from websrv, without the .gguf suffix; [] when it does not answer.
+        """The models on the console from websrv, sorted A to Z, without the .gguf suffix; [] when it does not answer.
 
         The listing also holds "." and ".." and whatever else is in the folder, so only .gguf files count, and a
         projector (mmproj) is part of a vision model rather than a model to load.
@@ -572,7 +572,8 @@ class PS5Client:
             names = [os.path.basename(entry.get("name", "")) for entry in json.loads(data)]
         except (ValueError, TypeError, AttributeError):
             return []
-        return [n.removesuffix(".gguf") for n in names if n.lower().endswith(".gguf") and "mmproj" not in n.lower()]
+        models = [n.removesuffix(".gguf") for n in names if n.lower().endswith(".gguf") and "mmproj" not in n.lower()]
+        return sorted(models, key=str.lower)
 
     def loaded_model(self) -> str | None:
         """The model the server reports as loaded, without the .gguf suffix; None when it does not answer."""
