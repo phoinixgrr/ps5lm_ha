@@ -541,7 +541,7 @@ class PS5Client:
     # -- model selection ------------------------------------------------------------------------------------------------
     def list_models(self) -> list[str]:
         """List the model files available on the console (excluding mmproj files).
-        
+
         Returns a list of model names (without .gguf extension) from GET /fs/data/PS5LM/models/?fmt=json.
         """
         data = self._get_text(f"http://{self.host}:{self.web_port}/fs/data/PS5LM/models/?fmt=json")
@@ -555,10 +555,10 @@ class PS5Client:
 
     def read_console_file(self, path: str) -> str | None:
         """Read a file from the console via websrv.
-        
+
         Args:
             path: The file path on the console (e.g., /data/PS5LM/app-args.txt)
-            
+
         Returns:
             The file contents as a string, or None if the file doesn't exist or can't be read.
         """
@@ -566,11 +566,11 @@ class PS5Client:
 
     def write_console_file(self, path: str, content: str) -> bool:
         """Write a file to the console via the /tools endpoint.
-        
+
         Args:
             path: The file path on the console
             content: The file contents
-            
+
         Returns:
             True if the write succeeded, False otherwise.
         """
@@ -594,27 +594,27 @@ class PS5Client:
 
     def build_app_args_for_model(self, model_name: str, current_app_args: str | None = None) -> str:
         """Build the app-args.txt content for a given model.
-        
+
         Args:
             model_name: The model file name (with .gguf extension)
             current_app_args: Optional current app-args.txt content to use as base
-            
+
         Returns:
             The app-args.txt content as a string.
         """
         # Check if a profile exists for this model
         profile_path = f"/data/PS5LM/profiles/{model_name}.args"
         profile_content = self.read_console_file(profile_path)
-        
+
         if profile_content:
             return profile_content
-        
+
         # Build from current app-args or defaults
         if current_app_args:
             lines = current_app_args.splitlines()
         else:
             lines = []
-        
+
         # Find and replace the model path
         new_lines = []
         model_path = f"/data/PS5LM/models/{model_name}.gguf"
@@ -633,5 +633,5 @@ class PS5Client:
                 new_lines.append("--tools")
             else:
                 new_lines.append(line)
-        
+
         return "\n".join(new_lines)

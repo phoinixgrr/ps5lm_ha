@@ -272,7 +272,7 @@ def test_list_models_empty_or_invalid(client, monkeypatch):
     monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: "invalid json" if "/models/" in url else None)
     models = client.list_models()
     assert models == []
-    
+
     monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: None)
     models = client.list_models()
     assert models == []
@@ -333,7 +333,7 @@ def test_build_app_args_fallback(client, monkeypatch):
         if "profiles/" in path:
             return None
         return current_args
-    
+
     monkeypatch.setattr(client, "read_console_file", mock_read)
     result = client.build_app_args_for_model("new_model.gguf")
     assert "-m /data/PS5LM/models/new_model.gguf" in result

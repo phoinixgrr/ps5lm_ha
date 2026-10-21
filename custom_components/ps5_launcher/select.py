@@ -79,7 +79,7 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         """Switch to the selected model.
-        
+
         Args:
             option: The model name to switch to (without .gguf extension)
         """
@@ -155,16 +155,16 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
 
     async def _upload_file_via_wfm(self, path: str, content: str) -> bool:
         """Upload a file to the console using the file manager on port 8888.
-        
+
         This uses the three-call sequence from the file manager:
         1. POST /api/upload/prepare - get task_id
         2. POST /api/upload-file - send file data
         3. POST /api/upload/finish?task_id=N - complete upload
-        
+
         Args:
             path: Full path on console (e.g., /data/PS5LM/app-args.txt)
             content: File contents as string
-            
+
         Returns:
             True if upload succeeded, False otherwise
         """
@@ -178,10 +178,10 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
                     host = "ps5.home"
             else:
                 host = "ps5.home"
-            
+
             api_base = f"http://{host}:8888/api"
             file_size = len(content.encode("utf-8"))
-            
+
             # Step 1: Prepare upload
             prepare_data = {
                 "path": path.rstrip("/"),
@@ -192,7 +192,7 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
                 "sizes": file_size,
                 "overwrite": 1,
             }
-            
+
             def _prepare_upload() -> bool:
                 prepare_req = urllib.request.Request(
                     f"{api_base}/upload/prepare",
@@ -200,18 +200,18 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
                     method="POST",
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                 )
-                
+
                 with urllib.request.urlopen(prepare_req, timeout=10) as response:
                     prepare_result = json.loads(response.read().decode())
                     if not prepare_result.get("ok"):
                         _LOGGER.error("Upload prepare failed: %s", prepare_result.get("error"))
                         return False
                     return True, prepare_result["task_id"]
-            
+
             success, task_id = await self.hass.async_add_executor_job(_prepare_upload)
             if not success:
                 return False
-            
+
             # Step 2: Send file data
             def _send_file(task_id: str) -> bool:
                 upload_req = urllib.request.Request(
@@ -227,34 +227,34 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
                         "X-WFM-Overwrite": "1",
                     },
                 )
-                
+
                 with urllib.request.urlopen(upload_req, timeout=10) as response:
                     if not response.read():
                         _LOGGER.error("Upload file failed")
                         return False
                     return True
-            
+
             if not await self.hass.async_add_executor_job(_send_file, task_id):
                 return False
-            
+
             # Step 3: Finish upload
             def _finish_upload(task_id: str) -> bool:
                 finish_req = urllib.request.Request(
                     f"{api_base}/upload/finish?task_id={task_id}",
                     method="POST",
                 )
-                
+
                 with urllib.request.urlopen(finish_req, timeout=10) as response:
                     if not response.read():
                         _LOGGER.error("Upload finish failed")
                         return False
                     return True
-            
+
             if not await self.hass.async_add_executor_job(_finish_upload, task_id):
                 return False
-            
+
             return True
-            
+
         except Exception as err:
             _LOGGER.error("File upload failed: %s", err)
             return False
