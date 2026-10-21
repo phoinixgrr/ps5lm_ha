@@ -2,7 +2,7 @@
 [![Validate with hassfest Action](https://github.com/phoinixgrr/ps5lm_ha/actions/workflows/hassfest-validation.yaml/badge.svg)](https://github.com/phoinixgrr/ps5lm_ha/actions/workflows/hassfest-validation.yaml)
 [![Tests](https://github.com/phoinixgrr/ps5lm_ha/actions/workflows/tests.yml/badge.svg)](https://github.com/phoinixgrr/ps5lm_ha/actions/workflows/tests.yml)
 
-# ![PS5LM for Home Assistant](images/logo.png)
+<h1><img src="https://raw.githubusercontent.com/phoinixgrr/ps5lm_ha/main/images/logo.png" alt="PS5LM for Home Assistant" width="520"></h1>
 
 On-demand local LLM inference on a PS5.
 
@@ -44,7 +44,7 @@ Manual: copy `custom_components/ps5_launcher/` to your `custom_components/` and 
 1. Get the Remote Play keys from chiaki-ng: `python3 tools/chiaki_keys.py`
 2. **Settings > Devices & Services > Add Integration > PS5LM**: enter the PS5 host and the two keys
 
-   ![Setup](images/setup.png)
+   <img src="https://raw.githubusercontent.com/phoinixgrr/ps5lm_ha/main/images/setup.png" alt="Setup" width="440">
 
 3. The second screen has defaults for everything; change them only if your setup differs
 
@@ -60,7 +60,7 @@ Manual: copy `custom_components/ps5_launcher/` to your `custom_components/` and 
 
 Everything except the host can be changed later under **Configure**.
 
-![Settings](images/settings.png)
+<img src="https://raw.githubusercontent.com/phoinixgrr/ps5lm_ha/main/images/settings.png" alt="Settings" width="440">
 
 ## Entities
 
@@ -73,7 +73,7 @@ Everything except the host can be changed later under **Configure**.
 | Model metrics | model, context size, generation and prompt speed, active and queued requests, token counters, prompt cache hit rate |
 | Console metrics | CPU and SoC temperature, fan speed, PS5LM memory, uptime, free space |
 
-![Metrics and diagnostics](images/diagnostics.png)
+<img src="https://raw.githubusercontent.com/phoinixgrr/ps5lm_ha/main/images/diagnostics.png" alt="Metrics and diagnostics" width="420">
 
 Services: `ps5_launcher.wake`, `ps5_launcher.standby`, `ps5_launcher.start_app`, `ps5_launcher.stop_app`.
 
