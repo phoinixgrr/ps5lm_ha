@@ -27,44 +27,47 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
     """Select entity for choosing the model to load."""
 
     _attr_icon = "mdi:brain"
-    _attr_options = []
 
     def __init__(self, coordinator: PS5Coordinator) -> None:
         super().__init__(coordinator, "model_select", "Model")
-        self._current_model: str | None = None
         self._model_list: list[str] = []
-        self._update_options()
+        self._loading = False
 
-    def _update_options(self) -> None:
-        """Refresh the model options from the console."""
-        if not self.coordinator.console_is_on():
-            self._model_list = []
-            self._current_model = None
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._maybe_load_models()
+
+    def _handle_coordinator_update(self) -> None:
+        self._maybe_load_models()
+        super()._handle_coordinator_update()
+
+    def _maybe_load_models(self) -> None:
+        """Read the model list once the console is on. The listing is a network call, so it runs in the executor."""
+        if self._loading or self._model_list or not self.coordinator.console_is_on():
             return
+        self._loading = True
+        self.hass.async_create_task(self._async_load_models())
 
-        if not self.coordinator.client.ready_url or not self.coordinator.client.is_ready():
-            self._model_list = []
-            self._current_model = None
-            return
-
+    async def _async_load_models(self) -> None:
         try:
-            self._model_list = self.coordinator.client.list_models()
-            # Get the current model from props if available
-            if self.coordinator.data and "metrics" in self.coordinator.data:
-                metrics = self.coordinator.data["metrics"]
-                if "model" in metrics:
-                    self._current_model = metrics["model"]
-        except Exception as err:
-            _LOGGER.error("Failed to update model options: %s", err)
-            self._model_list = []
-            self._current_model = None
-
+            self._model_list = await self.hass.async_add_executor_job(self.coordinator.client.list_models)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Could not list the models on the console")
+        finally:
+            self._loading = False
         self.async_write_ha_state()
 
     @property
+    def options(self) -> list[str]:
+        current = self.current_option
+        if current and current not in self._model_list:
+            return [current, *self._model_list]
+        return self._model_list
+
+    @property
     def current_option(self) -> str | None:
-        """Return the currently selected model."""
-        return self._current_model
+        """The model the server reports as loaded."""
+        return ((self.coordinator.data or {}).get("metrics") or {}).get("model")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -72,8 +75,6 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
         attrs = {"status": self.coordinator.status}
         if self._model_list:
             attrs["available_models"] = self._model_list
-        if self.coordinator.data and "metrics" in self.coordinator.data:
-            attrs["current_model"] = self.coordinator.data["metrics"].get("model")
         return attrs
 
     async def async_select_option(self, option: str) -> None:
@@ -135,9 +136,6 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
             _LOGGER.error("Model switch failed: %s", err)
             raise
 
-        # Update the current model after successful switch
-        self._current_model = option
-        self.async_write_ha_state()
 
     def _upload_file_via_wfm(self, path: str, content: str) -> bool:
         """Upload a file to the console using the file manager on port 8888.
