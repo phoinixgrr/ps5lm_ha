@@ -88,6 +88,8 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
         file_name = f"{option}.gguf"
 
         async def switch() -> None:
+            # Named here so the Model sensor and this dropdown show what is loading, not what was unloaded.
+            self.coordinator.switching_to = option
             text = await self.hass.async_add_executor_job(client.build_app_args_for_model, file_name, None)
             if not text:
                 raise HomeAssistantError(f"Could not build the arguments for {option}")
@@ -107,4 +109,7 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
             if loaded and loaded != option:
                 raise HomeAssistantError(f"PS5LM started with {loaded}, not {option}")
 
-        await self.coordinator._operation("model switch", f"switching to {option}", switch)
+        try:
+            await self.coordinator._operation("model switch", f"switching to {option}", switch)
+        finally:
+            self.coordinator.switching_to = None
