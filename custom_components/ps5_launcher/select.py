@@ -91,10 +91,22 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
             _LOGGER.error("Invalid model option: %s", option)
             return
 
-        if not self.coordinator.console_is_on():
+        # Check console state and readiness on executor to avoid blocking the event loop
+        def _check_conditions() -> tuple[bool, bool]:
+            console_on = self.coordinator.console_is_on()
+            ready = self.coordinator.client.ready_url is not None and self.coordinator.client.is_ready()
+            return console_on, ready
+
+        try:
+            console_on, ready = await self.hass.async_add_executor_job(_check_conditions)
+        except Exception as err:
+            _LOGGER.error("Failed to check conditions: %s", err)
+            raise HomeAssistantError("Failed to check console state")
+
+        if not console_on:
             raise HomeAssistantError("Console is off or unreachable")
 
-        if not self.coordinator.client.ready_url or not self.coordinator.client.is_ready():
+        if not ready:
             raise HomeAssistantError("PS5LM is not ready")
 
         model_path = f"/data/PS5LM/models/{option}.gguf"
@@ -103,8 +115,12 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
         async def switch_model() -> None:
             """Perform the model switch sequence."""
             # Step 1: Build app-args.txt for the new model
-            current_app_args = self.coordinator.client.read_console_file("/data/PS5LM/app-args.txt")
-            new_app_args = self.coordinator.client.build_app_args_for_model(model_path, current_app_args)
+            def _build_args() -> tuple[str | None, str | None]:
+                current = self.coordinator.client.read_console_file("/data/PS5LM/app-args.txt")
+                new = self.coordinator.client.build_app_args_for_model(model_path, current)
+                return current, new
+
+            current_app_args, new_app_args = await self.hass.async_add_executor_job(_build_args)
 
             if not new_app_args:
                 raise HomeAssistantError("Failed to build app arguments for model")
@@ -137,7 +153,7 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
             raise
 
 
-    def _upload_file_via_wfm(self, path: str, content: str) -> bool:
+    async def _upload_file_via_wfm(self, path: str, content: str) -> bool:
         """Upload a file to the console using the file manager on port 8888.
         
         This uses the three-call sequence from the file manager:
@@ -177,50 +193,65 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
                 "overwrite": 1,
             }
             
-            prepare_req = urllib.request.Request(
-                f"{api_base}/upload/prepare",
-                data=urllib.parse.urlencode(prepare_data).encode(),
-                method="POST",
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
+            def _prepare_upload() -> bool:
+                prepare_req = urllib.request.Request(
+                    f"{api_base}/upload/prepare",
+                    data=urllib.parse.urlencode(prepare_data).encode(),
+                    method="POST",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                
+                with urllib.request.urlopen(prepare_req, timeout=10) as response:
+                    prepare_result = json.loads(response.read().decode())
+                    if not prepare_result.get("ok"):
+                        _LOGGER.error("Upload prepare failed: %s", prepare_result.get("error"))
+                        return False
+                    return True, prepare_result["task_id"]
             
-            with urllib.request.urlopen(prepare_req, timeout=10) as response:
-                prepare_result = json.loads(response.read().decode())
-                if not prepare_result.get("ok"):
-                    _LOGGER.error("Upload prepare failed: %s", prepare_result.get("error"))
-                    return False
-                task_id = prepare_result["task_id"]
+            success, task_id = await self.hass.async_add_executor_job(_prepare_upload)
+            if not success:
+                return False
             
             # Step 2: Send file data
-            upload_req = urllib.request.Request(
-                f"{api_base}/upload-file",
-                data=content.encode("utf-8"),
-                method="POST",
-                headers={
-                    "Content-Type": "application/octet-stream",
-                    "X-WFM-Task-ID": str(task_id),
-                    "X-WFM-Path": quote(path.rstrip("/")),
-                    "X-WFM-Rel": path.split("/")[-1],
-                    "X-WFM-Size": str(file_size),
-                    "X-WFM-Overwrite": "1",
-                },
-            )
+            def _send_file(task_id: str) -> bool:
+                upload_req = urllib.request.Request(
+                    f"{api_base}/upload-file",
+                    data=content.encode("utf-8"),
+                    method="POST",
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "X-WFM-Task-ID": str(task_id),
+                        "X-WFM-Path": quote(path.rstrip("/")),
+                        "X-WFM-Rel": path.split("/")[-1],
+                        "X-WFM-Size": str(file_size),
+                        "X-WFM-Overwrite": "1",
+                    },
+                )
+                
+                with urllib.request.urlopen(upload_req, timeout=10) as response:
+                    if not response.read():
+                        _LOGGER.error("Upload file failed")
+                        return False
+                    return True
             
-            with urllib.request.urlopen(upload_req, timeout=10) as response:
-                if not response.read():
-                    _LOGGER.error("Upload file failed")
-                    return False
+            if not await self.hass.async_add_executor_job(_send_file, task_id):
+                return False
             
             # Step 3: Finish upload
-            finish_req = urllib.request.Request(
-                f"{api_base}/upload/finish?task_id={task_id}",
-                method="POST",
-            )
+            def _finish_upload(task_id: str) -> bool:
+                finish_req = urllib.request.Request(
+                    f"{api_base}/upload/finish?task_id={task_id}",
+                    method="POST",
+                )
+                
+                with urllib.request.urlopen(finish_req, timeout=10) as response:
+                    if not response.read():
+                        _LOGGER.error("Upload finish failed")
+                        return False
+                    return True
             
-            with urllib.request.urlopen(finish_req, timeout=10) as response:
-                if not response.read():
-                    _LOGGER.error("Upload finish failed")
-                    return False
+            if not await self.hass.async_add_executor_job(_finish_upload, task_id):
+                return False
             
             return True
             
