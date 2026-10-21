@@ -46,13 +46,14 @@ from .const import (
     SERVICE_STOP_APP,
     SERVICE_WAKE,
 )
+from .metrics import model_metrics_to_show
 from .ps5client import PS5Client, PS5Error, should_scrape_console
 
 CONSOLE_KEYS = ("cpu_temp", "soc_temp_max", "fan_pct", "uptime_s", "app_memory", "internal_free", "usb_free")
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SWITCH, Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS = [Platform.SWITCH, Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SELECT]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -92,6 +93,8 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
         self.console_interval = console_interval
         self._console_at: float | None = None
         self._console_last: dict[str, float] = {}
+        self._model_last: dict[str, float | str] = {}
+        self.switching_to: str | None = None  # the model a running switch is loading, so the sensors can name it
         self.op_lock = asyncio.Lock()
         self.pending: str | None = None  # console_on, console_off, app_on, app_off while an operation runs
         self.step: str = ""
@@ -116,6 +119,11 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
                 self._console_at = time.monotonic()
                 self._console_last = {k: metrics[k] for k in CONSOLE_KEYS if k in metrics}
             metrics = {**self._console_last, **metrics}
+        # A deliberate restart leaves the model server silent for about two minutes: hold its last readings for that
+        # time so a dashboard does not empty out and refill.
+        fresh = {k: v for k, v in metrics.items() if k not in CONSOLE_KEYS}
+        shown, self._model_last = model_metrics_to_show(fresh, self._model_last, bool(self.pending), self.switching_to)
+        metrics = {**metrics, **shown}
         return {"console": state or "off", "app_running": running, "app_ready": ready, "metrics": metrics}
 
     # -- what the entities show -------------------------------------------------------------------------------------

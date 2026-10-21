@@ -243,3 +243,229 @@ def test_standby_does_nothing_when_the_console_is_not_awake(client, monkeypatch)
     monkeypatch.setattr(client, "state", lambda: "standby")
     monkeypatch.setattr(ps5client, "goto_bed", lambda *a, **k: pytest.fail("must not be called"))
     client.standby()
+
+
+# -- model selection ---------------------------------------------------------------------------------------------------
+def test_list_models_returns_model_names(client, monkeypatch):
+    """Test that list_models returns model names without mmproj files."""
+    models_json = '''[
+        {"name": "/data/PS5LM/models/Qwen3.5-9B-Q6_K.gguf"},
+        {"name": "/data/PS5LM/models/Qwen3-14B-Q4_K_M.gguf"},
+        {"name": "/data/PS5LM/models/gemma-4-12b-it-Q5_K_M.gguf"},
+        {"name": "/data/PS5LM/models/vision-mmproj-f16.gguf"}
+    ]'''
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: models_json if "/models/" in url else None)
+    models = client.list_models()
+    assert models == ["gemma-4-12b-it-Q5_K_M", "Qwen3-14B-Q4_K_M", "Qwen3.5-9B-Q6_K"]  # A to Z, ignoring case
+    assert "vision-mmproj-f16" not in models
+
+
+def test_list_models_skips_dot_entries_and_other_files(client, monkeypatch):
+    """websrv lists '.' and '..' and any other file in the folder; only .gguf files are models."""
+    models_json = '[{"name": "."}, {"name": ".."}, {"name": "notes.txt"}, {"name": "Qwen3.5-9B-Q6_K.gguf"}, {"name": "x-mmproj.gguf"}]'
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: models_json if "/models/" in url else None)
+    assert client.list_models() == ["Qwen3.5-9B-Q6_K"]
+
+
+def test_list_models_empty_or_invalid(client, monkeypatch):
+    """Test that list_models handles empty or invalid responses."""
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: "invalid json" if "/models/" in url else None)
+    models = client.list_models()
+    assert models == []
+
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: None)
+    models = client.list_models()
+    assert models == []
+
+
+def test_read_console_file(client, monkeypatch):
+    """Test reading a file from the console."""
+    content = "test content\nline 2"
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: content if "/app-args.txt" in url else None)
+    result = client.read_console_file("/data/PS5LM/app-args.txt")
+    assert result == content
+
+
+def test_read_console_file_not_found(client, monkeypatch):
+    """Test reading a file that doesn't exist."""
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: None)
+    result = client.read_console_file("/data/PS5LM/nonexistent.txt")
+    assert result is None
+
+
+def test_loaded_model_reads_props(client, monkeypatch):
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: PROPS if url.endswith("/props") else None)
+    assert client.loaded_model() == "Qwen3.5-9B-Q6_K"
+
+
+def test_loaded_model_when_the_server_is_silent(client, monkeypatch):
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: None)
+    assert client.loaded_model() is None
+
+
+# -- writing a file through the file manager ---------------------------------------------------------------------------
+class _FakeResponse:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def read(self) -> bytes:
+        return self._text.encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def _record_uploads(monkeypatch, answers):
+    """Capture the requests upload_file sends, answering each with the matching entry of `answers`."""
+    sent = []
+
+    def fake_urlopen(request, timeout=None):
+        sent.append(request)
+        return _FakeResponse(answers[len(sent) - 1])
+
+    monkeypatch.setattr(ps5client.urllib.request, "urlopen", fake_urlopen)
+    return sent
+
+
+def test_upload_file_sends_prepare_bytes_and_finish(client, monkeypatch):
+    sent = _record_uploads(monkeypatch, ['{"ok": true, "task_id": 7}', '{"ok": true}', '{"ok": true}'])
+    client.upload_file("/data/PS5LM", "app-args.txt", "-m\nmodel.gguf\n")
+
+    assert len(sent) == 3
+    prepare, upload, finish = sent
+    assert prepare.full_url == "http://192.0.2.10:8888/api/upload/prepare"
+    assert b"path=%2Fdata%2FPS5LM" in prepare.data
+    assert b"overwrite=1" in prepare.data
+
+    assert upload.full_url == "http://192.0.2.10:8888/api/upload-file"
+    assert upload.data == b"-m\nmodel.gguf\n"
+    assert upload.get_header("X-wfm-task-id") == "7"
+    assert upload.get_header("X-wfm-path") == "%2Fdata%2FPS5LM"
+    assert upload.get_header("X-wfm-rel") == "app-args.txt"
+    assert upload.get_header("X-wfm-size") == str(len(b"-m\nmodel.gguf\n"))
+
+    assert finish.full_url == "http://192.0.2.10:8888/api/upload/finish?task_id=7"
+
+
+def test_upload_file_counts_bytes_not_characters(client, monkeypatch):
+    """A Greek comment in the file would make a character count disagree with the size the file manager is told."""
+    sent = _record_uploads(monkeypatch, ['{"ok": true, "task_id": 1}', "", ""])
+    client.upload_file("/data/PS5LM", "notes.txt", "καλημέρα\n")
+    assert sent[1].get_header("X-wfm-size") == str(len("καλημέρα\n".encode()))
+
+
+def test_upload_file_raises_when_the_file_manager_refuses(client, monkeypatch):
+    _record_uploads(monkeypatch, ['{"ok": false, "error": "no space left"}'])
+    with pytest.raises(PS5Error, match="no space left"):
+        client.upload_file("/data/PS5LM", "app-args.txt", "x")
+
+
+def test_upload_file_raises_when_there_is_no_task_id(client, monkeypatch):
+    _record_uploads(monkeypatch, ['{"ok": true}'])
+    with pytest.raises(PS5Error, match="task id"):
+        client.upload_file("/data/PS5LM", "app-args.txt", "x")
+
+
+def test_upload_file_raises_when_the_console_does_not_answer(client, monkeypatch):
+    def refuse(request, timeout=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(ps5client.urllib.request, "urlopen", refuse)
+    with pytest.raises(PS5Error, match="did not answer"):
+        client.upload_file("/data/PS5LM", "app-args.txt", "x")
+
+
+# -- the arguments for a model -----------------------------------------------------------------------------------------
+# app-args.txt holds one argument per line, so a flag's value is the line after it.
+CURRENT_ARGS = "\n".join([
+    "--log-file", "/data/PS5LM/llama.log",
+    "-m", "/data/PS5LM/models/Qwen3.5-9B-Q6_K.gguf",
+    "-c", "65536",
+    "-ctk", "q8_0",
+    "-ctv", "q8_0",
+    "-ctxcp", "8",
+    "-cram", "0",
+    "--tools", "read_file,write_file",
+    "-rea", "off",
+]) + "\n"
+
+
+def _pairs(text: str) -> dict[str, str]:
+    """The flags of an app-args.txt and the value on the line after each."""
+    lines = text.splitlines()
+    return {line: lines[i + 1] for i, line in enumerate(lines[:-1]) if line.startswith("-")}
+
+
+def test_build_app_args_from_profile(client, monkeypatch):
+    """A tuned profile for the model is used exactly as it is, whatever it says."""
+    profile = "-m\n/data/PS5LM/models/Qwen3-14B-Q4_K_M.gguf\n-c\n20480\n-ctk\nq4_0\n"
+    monkeypatch.setattr(client, "read_console_file", lambda path: profile if "/profiles/" in path else CURRENT_ARGS)
+    assert client.build_app_args_for_model("Qwen3-14B-Q4_K_M.gguf") == profile
+
+
+def test_build_app_args_from_profile_without_a_trailing_newline(client, monkeypatch):
+    monkeypatch.setattr(client, "read_console_file", lambda path: "-m\nx.gguf" if "/profiles/" in path else None)
+    assert client.build_app_args_for_model("x.gguf").endswith("\n")
+
+
+def test_build_app_args_falls_back_to_the_current_file(client, monkeypatch):
+    """With no profile: the same flags, the new model, and a context and cache small enough to start."""
+    monkeypatch.setattr(client, "read_console_file", lambda path: None if "/profiles/" in path else CURRENT_ARGS)
+    result = client.build_app_args_for_model("gemma-4-12b-it-Q5_K_M.gguf")
+    pairs = _pairs(result)
+
+    assert pairs["-m"] == "/data/PS5LM/models/gemma-4-12b-it-Q5_K_M.gguf"
+    assert pairs["-c"] == "8192"
+    assert pairs["-ctk"] == "q4_0"
+    assert pairs["-ctv"] == "q4_0"
+    # Every other flag is left as it was, and nothing of the old model survives.
+    assert pairs["--log-file"] == "/data/PS5LM/llama.log"
+    assert pairs["--tools"] == "read_file,write_file"
+    assert pairs["-rea"] == "off"
+    assert "Qwen3.5-9B" not in result
+    assert result.endswith("\n")
+
+
+def test_build_app_args_does_not_mistake_other_c_flags_for_the_context(client, monkeypatch):
+    """-ctk, -ctv, -ctxcp and -cram all start with "-c": only the line that IS "-c" is the context size."""
+    monkeypatch.setattr(client, "read_console_file", lambda path: None if "/profiles/" in path else CURRENT_ARGS)
+    pairs = _pairs(client.build_app_args_for_model("x.gguf"))
+    assert pairs["-c"] == "8192"
+    assert pairs["-ctxcp"] == "8"
+    assert pairs["-cram"] == "0"
+
+
+def test_build_app_args_takes_the_current_text_when_given(client, monkeypatch):
+    """The caller can pass the current file instead of having it read again."""
+    monkeypatch.setattr(client, "read_console_file", lambda path: None)
+    pairs = _pairs(client.build_app_args_for_model("x.gguf", CURRENT_ARGS))
+    assert pairs["-m"] == "/data/PS5LM/models/x.gguf"
+    assert pairs["-rea"] == "off"
+
+
+def test_build_app_args_appends_a_flag_the_current_file_does_not_have(client, monkeypatch):
+    monkeypatch.setattr(client, "read_console_file", lambda path: None)
+    pairs = _pairs(client.build_app_args_for_model("x.gguf", "-m\nold.gguf\n--metrics\n"))
+    assert pairs["-m"] == "/data/PS5LM/models/x.gguf"
+    assert pairs["-c"] == "8192"
+    assert pairs["-ctk"] == "q4_0"
+
+
+def test_build_app_args_with_nothing_to_start_from(client, monkeypatch):
+    """No profile and no current file: a minimal command line that still serves the API the integration reads."""
+    monkeypatch.setattr(client, "read_console_file", lambda path: None)
+    pairs = _pairs(client.build_app_args_for_model("test_model.gguf", None))
+    assert pairs["-m"] == "/data/PS5LM/models/test_model.gguf"
+    assert pairs["-c"] == "8192"
+    assert pairs["--port"] == "8081"
+    assert "--metrics" in client.build_app_args_for_model("test_model.gguf", None).splitlines()
+
+
+def test_list_models_is_sorted_ignoring_case(client, monkeypatch):
+    """A dropdown is easier to read A to Z, and case must not push every lowercase name to the end."""
+    listing = '[{"name": "zephyr.gguf"}, {"name": "Qwen3-14B.gguf"}, {"name": "gemma-4.gguf"}, {"name": "Alpha.gguf"}]'
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: listing if "/models/" in url else None)
+    assert client.list_models() == ["Alpha", "gemma-4", "Qwen3-14B", "zephyr"]

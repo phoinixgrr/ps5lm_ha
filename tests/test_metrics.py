@@ -1,6 +1,6 @@
 """Tests for the Prometheus text parser."""
 
-from custom_components.ps5_launcher.metrics import first, parse_prometheus
+from custom_components.ps5_launcher.metrics import first, model_metrics_to_show, parse_prometheus
 
 from .conftest import EXPORTER_METRICS
 
@@ -32,3 +32,45 @@ def test_missing_metric_or_label_returns_none():
 def test_colons_in_metric_names():
     m = parse_prometheus("llamacpp:requests_processing 2\n")
     assert first(m, "llamacpp:requests_processing") == 2
+
+
+# -- holding the model readings across a restart -----------------------------------------------------------------------
+FRESH = {"model": "Qwen3-14B-Q4_K_M", "context_size": 32768, "tok_per_s": 17.7}
+
+
+def test_fresh_readings_are_shown_and_remembered():
+    shown, remembered = model_metrics_to_show(FRESH, {}, pending=False, switching_to=None)
+    assert shown == FRESH
+    assert remembered == FRESH
+
+
+def test_silence_while_nothing_is_running_drops_the_readings():
+    """PS5LM is really gone, so those sensors should go unavailable rather than show a stale number."""
+    shown, remembered = model_metrics_to_show({}, FRESH, pending=False, switching_to=None)
+    assert shown == {}
+    assert remembered == {}
+
+
+def test_silence_during_an_operation_holds_the_readings():
+    shown, remembered = model_metrics_to_show({}, FRESH, pending=True, switching_to=None)
+    assert shown == FRESH
+    assert remembered == FRESH  # still the fallback for the next poll of the same restart
+
+
+def test_a_switch_names_the_model_being_loaded():
+    """The old model is already unloaded, so showing its name for two minutes would be wrong."""
+    shown, remembered = model_metrics_to_show({}, FRESH, pending=True, switching_to="Qwen3.5-9B-Q6_K")
+    assert shown["model"] == "Qwen3.5-9B-Q6_K"
+    assert shown["tok_per_s"] == 17.7  # the other readings are the last ones from before the restart
+    assert remembered["model"] == "Qwen3-14B-Q4_K_M"
+
+
+def test_nothing_to_hold_yet():
+    """A switch started before the server was ever read: no invented readings."""
+    assert model_metrics_to_show({}, {}, pending=True, switching_to="Qwen3.5-9B-Q6_K") == ({}, {})
+
+
+def test_holding_does_not_change_the_remembered_readings():
+    last = dict(FRESH)
+    model_metrics_to_show({}, last, pending=True, switching_to="other")
+    assert last == FRESH

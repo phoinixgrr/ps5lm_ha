@@ -23,6 +23,7 @@ import struct
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 
@@ -46,6 +47,25 @@ OSTYPE = b"Win10.0.0\0"
 DID_PREFIX = bytes([0x00, 0x18, 0x00, 0x00, 0x00, 0x07, 0x00, 0x40, 0x00, 0x80])
 
 _discovery_lock = threading.Lock()
+
+# PS5LM's files on the console. app-args.txt, when it exists, is the launch command line, one argument per line, so a
+# flag's value is the line after it. A tuned command line per model can be kept as PROFILES_DIR/<model file>.args.
+# The file manager (a payload separate from websrv) is the only way in that still answers while PS5LM is stopped.
+MODELS_DIR = "/data/PS5LM/models"
+PROFILES_DIR = "/data/PS5LM/profiles"
+ARGS_DIR = "/data/PS5LM"
+ARGS_NAME = "app-args.txt"
+ARGS_FILE = f"{ARGS_DIR}/{ARGS_NAME}"
+FILE_MANAGER_PORT = 8888
+
+# For a model with no profile: a context and cache small enough that most models which fit at all will start.
+FALLBACK_CONTEXT = "8192"
+FALLBACK_CACHE = "q4_0"
+FALLBACK_ARGS = [
+    "--log-file", "/data/PS5LM/llama.log", "-m", "", "-ngl", "999", "-fit", "off", "-c", FALLBACK_CONTEXT,
+    "-fa", "on", "-ctk", FALLBACK_CACHE, "-ctv", FALLBACK_CACHE, "-np", "1", "--host", "0.0.0.0", "--port", "8081",
+    "--metrics", "--tools", "read_file,write_file,edit_file,file_glob_search,grep_search,get_info",
+]
 
 
 def should_scrape_console(now: float, last_at: float | None, interval: float, busy: bool) -> bool:
@@ -537,3 +557,111 @@ class PS5Client:
         timings["total"] = time.monotonic() - t_start
         say("done")
         return timings
+
+    # -- models ------------------------------------------------------------------------------------------------------
+    def list_models(self) -> list[str]:
+        """The models on the console from websrv, sorted A to Z, without the .gguf suffix; [] when it does not answer.
+
+        The listing also holds "." and ".." and whatever else is in the folder, so only .gguf files count, and a
+        projector (mmproj) is part of a vision model rather than a model to load.
+        """
+        data = self._get_text(f"http://{self.host}:{self.web_port}/fs{MODELS_DIR}/?fmt=json")
+        if not data:
+            return []
+        try:
+            names = [os.path.basename(entry.get("name", "")) for entry in json.loads(data)]
+        except (ValueError, TypeError, AttributeError):
+            return []
+        models = [n.removesuffix(".gguf") for n in names if n.lower().endswith(".gguf") and "mmproj" not in n.lower()]
+        return sorted(models, key=str.lower)
+
+    def loaded_model(self) -> str | None:
+        """The model the server reports as loaded, without the .gguf suffix; None when it does not answer."""
+        base = self.llama_base
+        props = self._get_text(f"{base}/props") if base else None
+        if not props:
+            return None
+        try:
+            return os.path.basename(json.loads(props)["model_path"]).removesuffix(".gguf")
+        except (ValueError, KeyError, TypeError):
+            return None
+
+    def read_console_file(self, path: str) -> str | None:
+        """A text file from the console through websrv; None when it is missing or websrv does not answer."""
+        return self._get_text(f"http://{self.host}:{self.web_port}/fs{path}")
+
+    def upload_file(self, remote_dir: str, name: str, content: str) -> None:
+        """Write a file on the console through its web file manager, overwriting it.
+
+        Three requests, the same ones the file manager's own page sends: reserve a task, send the bytes, finish it.
+        Raises PS5Error if any of them fails.
+        """
+        data = content.encode()
+        base = f"http://{self.host}:{FILE_MANAGER_PORT}/api"
+
+        def call(path: str, form: dict[str, object] | None = None, body: bytes | None = None,
+                 headers: dict[str, str] | None = None) -> dict:
+            request = urllib.request.Request(  # noqa: S310 (local network URL)
+                base + path,
+                data=urllib.parse.urlencode(form).encode() if form is not None else body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"} if form is not None else (headers or {}),
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 (local network URL)
+                    text = response.read().decode(errors="replace")
+            except OSError as err:
+                raise PS5Error(f"the file manager did not answer {path}: {err}") from err
+            try:
+                answer = json.loads(text)
+            except ValueError:
+                return {}  # a step that answers with no JSON body
+            if isinstance(answer, dict) and answer.get("ok") is False:
+                raise PS5Error(f"the file manager refused {path}: {answer.get('error') or text[:120]}")
+            return answer if isinstance(answer, dict) else {}
+
+        task = call("/upload/prepare", form={"path": remote_dir, "src": name, "total": len(data), "count": 1,
+                                             "rels": name, "sizes": len(data), "overwrite": "1"})
+        task_id = task.get("task_id")
+        if task_id is None:
+            raise PS5Error("the file manager returned no upload task id")
+        call("/upload-file", body=data, headers={
+            "Content-Type": "application/octet-stream",
+            "X-WFM-Task-ID": str(task_id),
+            "X-WFM-Path": urllib.parse.quote(remote_dir, safe=""),
+            "X-WFM-Rel": urllib.parse.quote(name, safe=""),
+            "X-WFM-Size": str(len(data)),
+            "X-WFM-Overwrite": "1",
+        })
+        call("/upload/finish?" + urllib.parse.urlencode({"task_id": task_id}), body=b"")
+
+    def build_app_args_for_model(self, file_name: str, current_app_args: str | None = None) -> str:
+        """The app-args.txt content that starts PS5LM with `file_name` (a model file name, with .gguf).
+
+        A tuned profile for the model is used as it is. Otherwise the current app-args.txt is adapted: the same flags,
+        the new model, and a smaller context and cache, since the settings that suit one model can be too large for
+        the next. `current_app_args` is read from the console when not given.
+        """
+        profile = self.read_console_file(f"{PROFILES_DIR}/{file_name}.args")
+        if profile and profile.strip():
+            return profile if profile.endswith("\n") else profile + "\n"
+
+        text = current_app_args if current_app_args is not None else self.read_console_file(ARGS_FILE)
+        lines = [line for line in (text or "").splitlines() if line.strip()] or list(FALLBACK_ARGS)
+
+        def set_value(flag: str, value: str) -> None:
+            """Set the line after `flag`. Whole lines are compared: "-c" must not match -ctk, -ctv, -ctxcp or -cram."""
+            if flag not in lines:
+                lines.extend([flag, value])
+                return
+            index = lines.index(flag)
+            if index + 1 < len(lines):
+                lines[index + 1] = value
+            else:
+                lines.append(value)
+
+        set_value("-m", f"{MODELS_DIR}/{file_name}")
+        set_value("-c", FALLBACK_CONTEXT)
+        set_value("-ctk", FALLBACK_CACHE)
+        set_value("-ctv", FALLBACK_CACHE)
+        return "\n".join(lines) + "\n"

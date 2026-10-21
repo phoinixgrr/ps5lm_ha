@@ -33,3 +33,21 @@ def first(metrics: dict, metric: str, /, **labels: str) -> float | None:
         if all(sample_labels.get(k) == v for k, v in labels.items()):
             return value
     return None
+
+
+def model_metrics_to_show(fresh: dict, last: dict, pending: bool, switching_to: str | None) -> tuple[dict, dict]:
+    """The model-server readings to publish now, and the ones to remember for next time.
+
+    Restarting PS5LM on purpose (a model switch, or the Server switch) leaves its server silent for about two minutes.
+    The last readings are held for that time, with the model named as the one being loaded, so a dashboard does not
+    empty out and refill; Status and Model ready still say what is really happening. Silence while no operation is
+    running means the server is genuinely gone, so the readings are dropped and those sensors go unavailable.
+    """
+    if fresh:
+        return fresh, fresh
+    if not pending:
+        return {}, {}
+    held = dict(last)
+    if held and switching_to:
+        held["model"] = switching_to
+    return held, last
