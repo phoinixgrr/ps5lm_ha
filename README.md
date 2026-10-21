@@ -14,6 +14,7 @@ On-demand local LLM inference on a PS5.
 
 - Wakes the PS5 from rest mode, signs the user in, starts PS5LM and waits until the model is loaded (about 2 minutes)
 - Stops PS5LM, or puts the whole console back to rest mode
+- Switches the loaded model: the dropdown lists the models on the console and restarts PS5LM with the one you pick
 - Exposes PS5LM and console metrics as sensors
 - Everything is a switch or a service, so automations can do it
 
@@ -24,6 +25,10 @@ On-demand local LLM inference on a PS5.
 3. [ps5-payload-websrv](https://github.com/ps5-payload-dev/websrv) launches PS5LM
 4. PS5LM's `/health` is polled until the model answers
 5. Rest mode is sent as a Remote Play control message
+
+A model switch writes PS5LM's `app-args.txt` through the console's web file manager and restarts the app, because a
+model cannot be swapped in place. A tuned command line per model can be kept as `/data/PS5LM/profiles/<model>.args`
+and is then used as it is; otherwise the current one is reused with the new model and a smaller context.
 
 No cloud and no extra Python packages. The Remote Play part is a small Python re-implementation of what [chiaki-ng](https://github.com/streetpea/chiaki-ng) does; chiaki-ng is only needed once, to register the console.
 
@@ -70,6 +75,7 @@ Everything except the host can be changed later under **Configure**.
 | **Server** switch | on = start PS5LM (wakes the console if needed), off = stop PS5LM |
 | **Status** | Rest mode, Waking the console, Signing in, Starting PS5LM, Loading the model, Model ready, ... |
 | **Model ready** | PS5LM answers its health check |
+| **Model** select | the models on the console; picking one restarts PS5LM with it (about 2 minutes) |
 | Model metrics | model, context size, generation and prompt speed, active and queued requests, token counters, prompt cache hit rate |
 | Console metrics | CPU and SoC temperature, fan speed, PS5LM memory, uptime, free space |
 
