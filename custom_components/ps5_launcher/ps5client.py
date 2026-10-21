@@ -548,8 +548,8 @@ class PS5Client:
         if not data:
             return []
         try:
-            entries = json.loads(data)
-            return [os.path.basename(e.get("name", "")).removesuffix(".gguf") for e in entries if "mmproj" not in e.get("name", "").lower()]
+            names = [os.path.basename(e.get("name", "")) for e in json.loads(data)]
+            return [n.removesuffix(".gguf") for n in names if n.lower().endswith(".gguf") and "mmproj" not in n.lower()]
         except (ValueError, TypeError):
             return []
 

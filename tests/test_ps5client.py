@@ -260,6 +260,13 @@ def test_list_models_returns_model_names(client, monkeypatch):
     assert "vision-mmproj-f16" not in models
 
 
+def test_list_models_skips_dot_entries_and_other_files(client, monkeypatch):
+    """websrv lists '.' and '..' and any other file in the folder; only .gguf files are models."""
+    models_json = '[{"name": "."}, {"name": ".."}, {"name": "notes.txt"}, {"name": "Qwen3.5-9B-Q6_K.gguf"}, {"name": "x-mmproj.gguf"}]'
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: models_json if "/models/" in url else None)
+    assert client.list_models() == ["Qwen3.5-9B-Q6_K"]
+
+
 def test_list_models_empty_or_invalid(client, monkeypatch):
     """Test that list_models handles empty or invalid responses."""
     monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: "invalid json" if "/models/" in url else None)
