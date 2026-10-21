@@ -10,6 +10,8 @@ On-demand local LLM inference on a PS5.
 
 ![Device page](images/device.png)
 
+<img src="https://raw.githubusercontent.com/phoinixgrr/ps5lm_ha/main/images/model-select.png" alt="Model dropdown" width="520">
+
 ## What it does
 
 - Wakes the PS5 from rest mode, signs the user in, starts PS5LM and waits until the model is loaded (about 2 minutes)
