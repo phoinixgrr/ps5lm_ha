@@ -138,23 +138,33 @@ Wakes the console, asks the local model, sends the answer, and puts the console 
 
 ### Rest mode when idle
 
-One hour after the last generated token. A fixed time would cut off a running chat; this waits until nothing has happened for an hour.
+Two hours after the last generated token, counting every client (Assist, opencode, the web chat).
 
 ```yaml
 - alias: PS5LM idle to rest mode
   triggers:
-    - trigger: state
-      entity_id: sensor.ps5lm_ps5_home_tokens_generated
-      for: "01:00:00"
+    - trigger: time_pattern
+      minutes: "/10"
   conditions:
     - condition: state
-      entity_id: switch.ps5lm_ps5_home_console
+      entity_id: binary_sensor.ps5lm_ps5_home_model_ready
       state: "on"
+    - condition: numeric_state
+      entity_id: sensor.ps5lm_ps5_home_active_requests
+      below: 1
+    - condition: template
+      value_template: >
+        {{ now() - states.sensor.ps5lm_ps5_home_tokens_generated.last_changed > timedelta(hours=2)
+           and now() - states.switch.ps5lm_ps5_home_console.last_changed > timedelta(hours=2) }}
   actions:
     - action: switch.turn_off
       target:
         entity_id: switch.ps5lm_ps5_home_console
 ```
+
+It checks every 10 minutes rather than waiting with `for:`, because a Home Assistant restart cancels a `for:` wait and an
+idle model never changes the counter again. It only acts while the model is loaded: with PS5LM stopped the counter is
+unavailable, which would otherwise count as idle and send the console to rest mode in the middle of a game.
 
 ### Rest mode when nobody is home
 
