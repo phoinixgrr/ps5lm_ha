@@ -38,20 +38,25 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
         super()._handle_coordinator_update()
 
     def _maybe_load_models(self) -> None:
-        """Read the model list once the console is on. The listing is a network call, so it runs in the executor."""
-        if self._loading or self._model_list or not self.coordinator.console_is_on():
+        """Re-read the model folder on every coordinator update while the console is on, so an upload shows up within
+        one scan interval. The listing is one small request to websrv, run in the executor."""
+        if self._loading or not self.coordinator.console_is_on():
             return
         self._loading = True
         self.hass.async_create_task(self._async_load_models())
 
     async def _async_load_models(self) -> None:
         try:
-            self._model_list = await self.hass.async_add_executor_job(self.coordinator.client.list_models)
+            models = await self.hass.async_add_executor_job(self.coordinator.client.list_models)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Could not list the models on the console")
+            models = []
         finally:
             self._loading = False
-        self.async_write_ha_state()
+        # [] means websrv did not answer (a real folder is never empty here): keep the list we have.
+        if models and models != self._model_list:
+            self._model_list = models
+            self.async_write_ha_state()
 
     @property
     def options(self) -> list[str]:
