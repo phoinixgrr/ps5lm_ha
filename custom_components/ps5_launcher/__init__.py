@@ -101,13 +101,24 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
         self.last_result: str | None = None
         self.failure: tuple[str, float] | None = None  # (reason, when) of the last failed operation, shown in Status for a while
 
+    async def _app_state(self) -> tuple[bool | None, bool | None]:
+        """Whether the app runs and whether its model answers. The sandbox folder outlives the app (after a close or a rest
+        mode), so while the model is not answering the process itself is checked too; without that the status stays on
+        "Loading the model" forever after PS5LM has closed. Not checked while the model answers: reading the exporter
+        stalls a running model for seconds."""
+        running = await self.hass.async_add_executor_job(self.client.app_running)
+        ready = None
+        if running and self.client.ready_url:
+            ready = await self.hass.async_add_executor_job(self.client.is_ready)
+            if not ready and await self.hass.async_add_executor_job(self.client.app_process_alive) is False:
+                running, ready = False, None
+        return running, ready
+
     async def _async_update_data(self) -> dict:
         state = await self.hass.async_add_executor_job(self.client.state)
         running = ready = None
         if state == "ready":
-            running = await self.hass.async_add_executor_job(self.client.app_running)
-            if running and self.client.ready_url:
-                ready = await self.hass.async_add_executor_job(self.client.is_ready)
+            running, ready = await self._app_state()
         # The console exporter is read rarely and not while the model is answering: each read stalls the model for seconds.
         busy = bool(((self.data or {}).get("metrics") or {}).get("requests_active"))
         scrape = state == "ready" and should_scrape_console(time.monotonic(), self._console_at, self.console_interval, busy)
