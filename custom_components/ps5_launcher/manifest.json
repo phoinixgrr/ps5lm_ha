@@ -10,5 +10,5 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/phoinixgrr/ps5lm_ha/issues",
   "requirements": [],
-  "version": "0.3.1-dev01"
+  "version": "0.3.3-dev01"
 }

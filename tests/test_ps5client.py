@@ -142,6 +142,56 @@ def test_stop_app_uses_empty_title(client, monkeypatch):
     assert calls == ["http://192.0.2.10:8080/launch?titleId="]
 
 
+
+# -- a sandbox left behind is not a running app ------------------------------------------------------------------------
+ALIVE = EXPORTER_METRICS + 'ps5_process_instances{name="eboot.bin"} 1\nps5_process_instances{name="SceShellUI"} 1\n'
+GONE = EXPORTER_METRICS + 'ps5_process_instances{name="SceShellUI"} 1\n'
+
+
+def test_process_alive_from_exporter(client, monkeypatch):
+    _serve(client, monkeypatch, {":9100/metrics": ALIVE})
+    assert client.app_process_alive() is True
+    _serve(client, monkeypatch, {":9100/metrics": GONE})
+    assert client.app_process_alive() is False
+
+
+def test_process_unknown_falls_back_to_the_sandbox(client, monkeypatch):
+    monkeypatch.setattr(client, "app_running", lambda title_id=None: True)
+    _serve(client, monkeypatch, {":9100/metrics": EXPORTER_METRICS})  # no process metrics
+    assert client.app_process_alive() is None and client.app_started()
+    _serve(client, monkeypatch, {})  # exporter down
+    assert client.app_process_alive() is None and client.app_started()
+    client.console_metrics = False
+    assert client.app_process_alive() is None
+
+
+def test_start_relaunches_over_a_stale_sandbox(client, monkeypatch):
+    """Sandbox there, process gone: start() must launch and wait for the process, not report it running at once."""
+    launches, pages = [], {":9100/metrics": GONE}
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: next((v for k, v in pages.items() if url.endswith(k)), None))
+    monkeypatch.setattr(client, "app_running", lambda title_id=None: True)
+    monkeypatch.setattr(client, "state", lambda: "ready")
+    monkeypatch.setattr(client, "websrv_up", lambda: True)
+    monkeypatch.setattr(ps5client, "remote_play_login", lambda *a: "HTTP/1.1 200 OK")
+
+    def launch(title_id=None):
+        launches.append(title_id)
+        pages[":9100/metrics"] = ALIVE
+
+    monkeypatch.setattr(client, "launch_once", launch)
+    steps = []
+    client.start(ready_url="", progress=steps.append)
+    assert launches and "app already running" not in steps and "app launched" in steps
+
+
+def test_stop_waits_for_the_process_not_the_sandbox(client, monkeypatch):
+    pages = {":9100/metrics": ALIVE}
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: next((v for k, v in pages.items() if url.endswith(k)), None))
+    monkeypatch.setattr(client, "app_running", lambda title_id=None: True)  # the sandbox never goes away
+    monkeypatch.setattr(client, "websrv_up", lambda: True)
+    monkeypatch.setattr(client, "_http", lambda url, timeout=4.0: pages.update({":9100/metrics": GONE}) or 503)
+    client.stop_app()  # returns once eboot.bin is gone
+
 def test_stop_app_needs_websrv(client, monkeypatch):
     monkeypatch.setattr(client, "websrv_up", lambda: False)
     with pytest.raises(PS5Error):

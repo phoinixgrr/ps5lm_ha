@@ -131,9 +131,10 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
     def status(self) -> str:
         if self.pending:
             return self.step or "Working"
-        if self.failure and time.monotonic() - self.failure[1] < FAILURE_SHOWN_FOR:
-            return f"Failed: {self.failure[0]}"[:255]
         data = self.data or {}
+        # A model that became ready after its start timed out is not a failure any more.
+        if self.failure and not data.get("app_ready") and time.monotonic() - self.failure[1] < FAILURE_SHOWN_FOR:
+            return f"Failed: {self.failure[0]}"[:255]
         console = data.get("console")
         if console == "standby":
             return "Rest mode"

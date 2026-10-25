@@ -42,6 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 DISCOVERY_PORT = 9302
 RP_PORT = 9295
 PROTO = "00030010"
+READY_TIMEOUT = 420  # seconds from the app's start until the ready URL must answer
 HMAC_KEY_PS5 = bytes([0x46, 0x46, 0x87, 0xB3, 0x49, 0xCA, 0x8C, 0xE8, 0x59, 0xC5, 0x27, 0x0F, 0x5D, 0x7A, 0x69, 0xD6])
 OSTYPE = b"Win10.0.0\0"
 DID_PREFIX = bytes([0x00, 0x18, 0x00, 0x00, 0x00, 0x07, 0x00, 0x40, 0x00, 0x80])
@@ -439,6 +440,26 @@ class PS5Client:
         except (OSError, ValueError):
             return None
 
+    def app_process_alive(self) -> bool | None:
+        """Whether the app's process (eboot.bin) runs, from the console exporter; None when that cannot be told.
+
+        The sandbox alone is not proof: it can outlive the app (after rest mode, or a close that left it behind), and
+        then a launch looks done at once while the app is not running. Only used while starting, since every exporter
+        read stalls the model for seconds."""
+        if not self.console_metrics:
+            return None
+        text = self._get_text(f"http://{self.host}:{self.exporter_port}/metrics")
+        if not text:
+            return None
+        m = parse_prometheus(text)
+        if "ps5_process_instances" not in m:  # an exporter without process metrics
+            return None
+        return bool(first(m, "ps5_process_instances", name="eboot.bin"))
+
+    def app_started(self, title_id: str | None = None) -> bool:
+        """The sandbox exists and the process runs (or the exporter cannot tell, then the sandbox decides)."""
+        return bool(self.app_running(title_id)) and self.app_process_alive() is not False
+
     # -- actions -----------------------------------------------------------------------------------------------
     def wake(self) -> None:
         send_wake(self.host, self.regist_key)
@@ -478,7 +499,7 @@ class PS5Client:
         if not self.app_running():
             return
         self._http(f"http://{self.host}:{self.web_port}/launch?titleId=", timeout=20)
-        if not self._wait(lambda: not self.app_running(), 30, step=1.0):
+        if not self._wait(lambda: not self.app_started(), 30, step=1.0):
             raise PS5Error("PS5LM did not stop")
 
     def launch_once(self, title_id: str | None = None) -> None:
@@ -504,7 +525,7 @@ class PS5Client:
         timings: dict[str, float] = {}
         t_start = time.monotonic()
 
-        if self.app_running(title):
+        if self.app_started(title):
             say("app already running")
         else:
             if self.state() != "ready":
@@ -539,11 +560,11 @@ class PS5Client:
             t_launch = time.monotonic()
             say("launching the app")
             try:
-                while not self.app_running(title):
+                while not self.app_started(title):
                     if time.monotonic() - t_launch > 150:
                         raise PS5Error("PS5LM did not start within 150 s (no user signed in? wrong title id?)")
                     self.launch_once(title)
-                    self._wait(lambda: bool(self.app_running(title)), 6, step=1.0)
+                    self._wait(lambda: self.app_started(title), 6, step=1.0)
             finally:
                 stop.set()
             timings["launch"] = time.monotonic() - t_start
@@ -551,8 +572,9 @@ class PS5Client:
 
         if ready:
             say("waiting for the ready URL")
-            if not self._wait(lambda: self._http(ready) == 200, 300):
-                raise PS5Error(f"{ready} did not answer 200 within 300 s")
+            # Counted from the moment the app really runs; a large model cold-started from rest mode needs a few minutes.
+            if not self._wait(lambda: self._http(ready) == 200, READY_TIMEOUT):
+                raise PS5Error(f"{ready} did not answer 200 within {READY_TIMEOUT} s")
             timings["ready"] = time.monotonic() - t_start
         timings["total"] = time.monotonic() - t_start
         say("done")
