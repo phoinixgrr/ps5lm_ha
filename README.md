@@ -24,19 +24,20 @@ On-demand local LLM inference on a PS5.
 
 1. Wake packet over the Remote Play discovery port (UDP 9302)
 2. A Remote Play control connection signs the user in. A console woken from rest mode sits at the "press the PS button" screen and cannot launch apps until someone is signed in.
-3. [ps5-payload-websrv](https://github.com/ps5-payload-dev/websrv) launches PS5LM
+3. [ps5-payload-websrv](https://github.com/ps5-payload-dev/websrv) (loaded via Payload Manager) launches PS5LM
 4. PS5LM's `/health` is polled until the model answers
 5. Rest mode is sent as a Remote Play control message
 
-A model switch writes PS5LM's `app-args.txt` through the console's web file manager and restarts the app, because a
-model cannot be swapped in place. A tuned command line per model can be kept as `/data/PS5LM/profiles/<model>.args`
-and is then used as it is; otherwise the current one is reused with the new model and a smaller context.
+A model switch writes PS5LM's `app-args.txt` through the console's web [file manager](https://github.com/owendswang/ps5-web-file-manager) (port 8888, loaded via Payload Manager) and restarts the app, because a model cannot be swapped in place. A tuned command line per model can be kept as `/data/PS5LM/profiles/<model>.args` and is then used as it is; otherwise the current one is reused with the new model and a smaller context.
 
 No cloud and no extra Python packages. The Remote Play part is a small Python re-implementation of what [chiaki-ng](https://github.com/streetpea/chiaki-ng) does; chiaki-ng is only needed once, to register the console.
 
 ## Requirements
 
-- A jailbroken PS5 with etaHEN, PS5LM and ps5-payload-websrv (port 8080)
+- A jailbroken PS5 with [Payload Manager](https://github.com/itsPLK/ps5-payload-manager) installed
+- PS5LM application installed on the console
+- [ps5-payload-websrv](https://github.com/ps5-payload-dev/websrv) payload loaded via Payload Manager (port 8080)
+- [ps5-payload-filemanager](https://github.com/owendswang/ps5-web-file-manager) payload loaded via Payload Manager (port 8888)
 - The console registered for Remote Play in chiaki-ng
 - On the PS5: **Enable Turning On PS5 from Network** (Settings > System > Power Saving > Features Available in Rest Mode) and **Log In to PS5 Automatically** (Settings > Users and Accounts > Login Settings)
 
@@ -236,7 +237,7 @@ Stops PS5LM if the hottest SoC sensor stays above 85 °C, and tells you.
 
 ## Notes
 
-- Tested with PS5LM v0.9.1, websrv v0.34 and ps5-exporter v0.2.0 on a CFI-1216A, Home Assistant 2026.10
+- Tested with PS5LM v0.9.1, websrv v0.34, filemanager v1.12 and ps5-exporter v0.2.0 on a CFI-1216A, Home Assistant 2026.10
 - The console handles one Remote Play session at a time. While chiaki-ng, the PS Remote Play app or a previous session is connected, rest mode (and the sign-in after a wake) is refused; the integration retries for up to 90 s and then shows "Failed: Remote Play is in use" in the Status sensor for 5 minutes. Close the other app and try again.
 - Reading the console metrics makes the console stall the model for a few seconds (the exporter walks the whole process table), so they are read only every 2 minutes and never while a request is running. Lowering the interval makes answers stutter.
 - A full power-off ends the jailbreak; etaHEN and websrv then have to be loaded again by hand
