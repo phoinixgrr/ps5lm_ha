@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 
@@ -519,3 +520,131 @@ def test_list_models_is_sorted_ignoring_case(client, monkeypatch):
     listing = '[{"name": "zephyr.gguf"}, {"name": "Qwen3-14B.gguf"}, {"name": "gemma-4.gguf"}, {"name": "Alpha.gguf"}]'
     monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: listing if "/models/" in url else None)
     assert client.list_models() == ["Alpha", "gemma-4", "Qwen3-14B", "zephyr"]
+
+
+# -- another app started from the controller: measured on the console -------------------------------------------------
+# Both snapshots are real exporter output, trimmed to the lines the check reads. In both, eboot.bin runs and PS5LM's
+# sandbox folder exists; only PS5LM's download0 mount tells them apart.
+_FIX = os.path.join(os.path.dirname(__file__), "fixtures")
+GAME_RUNNING = open(os.path.join(_FIX, "exporter_game_running.prom")).read()   # Silent Hill 2 open, PS5LM closed
+PS5LM_RUNNING = open(os.path.join(_FIX, "exporter_ps5lm_running.prom")).read()  # PS5LM open, model ready
+
+
+def _console(client, monkeypatch, pages):
+    monkeypatch.setattr(client, "_get_text", lambda url, timeout=3.0: next((v for k, v in pages.items() if url.endswith(k)), None))
+    monkeypatch.setattr(client, "app_running", lambda title_id=None: True)  # PS5LM's sandbox folder never goes away
+
+
+def test_another_app_is_not_ps5lm_although_eboot_runs(client, monkeypatch):
+    _console(client, monkeypatch, {":9100/metrics": GAME_RUNNING})
+    assert 'name="eboot.bin"} 1' in GAME_RUNNING
+    assert client.app_process_alive() is False and client.app_started() is False
+
+
+def test_ps5lm_running_is_seen_by_its_mount(client, monkeypatch):
+    _console(client, monkeypatch, {":9100/metrics": PS5LM_RUNNING})
+    assert client.app_process_alive() is True and client.app_started() is True
+
+
+def test_no_filesystem_data_falls_back_to_eboot(client, monkeypatch):
+    failed = GAME_RUNNING.replace('collector="filesystems"} 1', 'collector="filesystems"} 0')
+    _console(client, monkeypatch, {":9100/metrics": failed})
+    assert client.app_process_alive() is True  # cannot tell the apps apart: behave as 0.3.4 did
+
+
+def test_stop_leaves_another_app_running(client, monkeypatch):
+    calls = []
+    _console(client, monkeypatch, {":9100/metrics": GAME_RUNNING})
+    monkeypatch.setattr(client, "websrv_up", lambda: True)
+    monkeypatch.setattr(client, "_http", lambda url, timeout=4.0: calls.append(url) or 503)
+    client.stop_app()
+    assert calls == []  # the game is not closed
+
+
+def test_start_over_another_app_launches_once(client, monkeypatch):
+    pages, launches = {":9100/metrics": GAME_RUNNING}, []
+    _console(client, monkeypatch, pages)
+    monkeypatch.setattr(client, "state", lambda: "ready")
+    monkeypatch.setattr(client, "websrv_up", lambda: True)
+    monkeypatch.setattr(ps5client, "remote_play_login", lambda *a: "HTTP/1.1 200 OK")
+
+    def launch(title_id=None):
+        launches.append(title_id)
+        pages[":9100/metrics"] = PS5LM_RUNNING  # websrv closes the game and PS5LM mounts its download0
+
+    monkeypatch.setattr(client, "launch_once", launch)
+    steps = []
+    client.start(ready_url="", progress=steps.append)
+    assert len(launches) == 1 and "app already running" not in steps and "app launched" in steps
+
+
+def test_start_waits_before_launching_again(client, monkeypatch):
+    """A launch closes whatever runs, so a launch that has not shown yet must not be repeated quickly."""
+    pages, launches, waits = {":9100/metrics": GAME_RUNNING}, [], []
+    _console(client, monkeypatch, pages)
+    monkeypatch.setattr(client, "state", lambda: "ready")
+    monkeypatch.setattr(client, "websrv_up", lambda: True)
+    monkeypatch.setattr(ps5client, "remote_play_login", lambda *a: "HTTP/1.1 200 OK")
+    monkeypatch.setattr(client, "launch_once", lambda title_id=None: launches.append(1))
+    real_wait = client._wait
+
+    def wait(test, limit, step=3.0, stop=None):
+        waits.append(limit)
+        if len(launches) == 2:
+            pages[":9100/metrics"] = PS5LM_RUNNING
+        return test()
+
+    monkeypatch.setattr(client, "_wait", wait)
+    client.start(ready_url="", progress=lambda m: None)
+    assert len(launches) == 2 and ps5client.LAUNCH_SETTLE in waits and ps5client.LAUNCH_SETTLE >= 20
+
+
+# -- while the model loads, follow the console --------------------------------------------------------------------------
+class _Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def monotonic(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+def _loading(client, monkeypatch, states, alive):
+    """A start that waits for the model: `states` and `alive` are what discovery and the mount say at each check."""
+    clock = _Clock()
+    monkeypatch.setattr(ps5client.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(ps5client.time, "sleep", clock.sleep)
+    monkeypatch.setattr(client, "_http", lambda url, timeout=4.0: 503)
+    it_s, it_a = iter(states), iter(alive)
+    monkeypatch.setattr(client, "state", lambda: next(it_s, states[-1]))
+    monkeypatch.setattr(client, "app_process_alive", lambda title_id=None: next(it_a, alive[-1]))
+    return clock
+
+
+def test_rest_mode_while_loading_stops_the_wait(client, monkeypatch):
+    clock = _loading(client, monkeypatch, ["ready", "standby", "standby"], [True])
+    with pytest.raises(ps5client.PS5Interrupted, match="rest mode"):
+        client._wait_until_ready("http://ps5/health", "PPSA99575")
+    assert clock.t - 1000 < 60  # seconds, not the 7-minute timeout
+
+
+def test_another_app_while_loading_stops_the_wait(client, monkeypatch):
+    clock = _loading(client, monkeypatch, ["ready"], [True, False, False])
+    with pytest.raises(ps5client.PS5Interrupted, match="another app"):
+        client._wait_until_ready("http://ps5/health", "PPSA99575")
+    assert clock.t - 1000 < 60
+
+
+def test_one_lost_packet_or_slow_mount_does_not_end_a_good_start(client, monkeypatch):
+    _loading(client, monkeypatch, ["ready", None, "ready", "ready"], [False, True, True])
+    answers = iter([503] * 20 + [200])
+    monkeypatch.setattr(client, "_http", lambda url, timeout=4.0: next(answers))
+    client._wait_until_ready("http://ps5/health", "PPSA99575")  # returns, no exception
+
+
+def test_model_that_never_answers_still_times_out(client, monkeypatch):
+    _loading(client, monkeypatch, ["ready"], [True])
+    with pytest.raises(ps5client.PS5Error, match="did not answer"):
+        client._wait_until_ready("http://ps5/health", "PPSA99575")

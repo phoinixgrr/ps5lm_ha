@@ -77,3 +77,21 @@ async def test_answering_model_never_reads_the_exporter():
 
 async def test_no_sandbox_means_not_running():
     assert await _app_state(_Client(sandbox=False, answers=False, process=True)) == (False, None)
+
+
+# -- an operation the console interrupted is not shown as a failure ------------------------------------------------------
+async def test_interrupted_start_shows_the_real_state_not_a_failure():
+    import asyncio
+    from custom_components.ps5_launcher.ps5client import PS5Interrupted
+
+    async def work():
+        raise PS5Interrupted("the console went to rest mode or off while the model was loading")
+
+    async def refresh():
+        pass
+
+    fake = SimpleNamespace(op_lock=asyncio.Lock(), failure=None, pending=None, step="", last_result=None,
+                           async_update_listeners=lambda: None, async_request_refresh=refresh,
+                           client=SimpleNamespace(host="ps5.home"))
+    await PS5Coordinator._operation(fake, "app_on", "Starting", work)  # does not raise
+    assert fake.failure is None and fake.last_result.startswith("stopped:") and fake.pending is None

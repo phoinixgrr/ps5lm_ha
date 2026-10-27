@@ -47,7 +47,7 @@ from .const import (
     SERVICE_WAKE,
 )
 from .metrics import model_metrics_to_show
-from .ps5client import PS5Client, PS5Error, should_scrape_console
+from .ps5client import PS5Client, PS5Error, PS5Interrupted, should_scrape_console
 
 CONSOLE_KEYS = ("cpu_temp", "soc_temp_max", "fan_pct", "uptime_s", "app_memory", "internal_free", "usb_free")
 
@@ -195,6 +195,10 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
             self.async_update_listeners()
             try:
                 result = await work()
+            except PS5Interrupted as err:
+                # Not a failure to show: the console did something else meanwhile, and Status should say what it does now.
+                _LOGGER.info("%s: %s stopped: %s", self.client.host, name, err)
+                self.last_result = f"stopped: {err}"
             except PS5Error as err:
                 self.last_result = f"failed: {err}"
                 self.failure = (str(err), time.monotonic())

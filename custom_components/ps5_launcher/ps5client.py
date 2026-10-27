@@ -43,6 +43,8 @@ DISCOVERY_PORT = 9302
 RP_PORT = 9295
 PROTO = "00030010"
 READY_TIMEOUT = 420  # seconds from the app's start until the ready URL must answer
+READY_CHECK_EVERY = 15  # seconds between checks that the console and PS5LM are still there while the model loads
+LAUNCH_SETTLE = 25  # seconds to wait for a launch to show before launching again (each launch closes the running app)
 HMAC_KEY_PS5 = bytes([0x46, 0x46, 0x87, 0xB3, 0x49, 0xCA, 0x8C, 0xE8, 0x59, 0xC5, 0x27, 0x0F, 0x5D, 0x7A, 0x69, 0xD6])
 OSTYPE = b"Win10.0.0\0"
 DID_PREFIX = bytes([0x00, 0x18, 0x00, 0x00, 0x00, 0x07, 0x00, 0x40, 0x00, 0x80])
@@ -80,6 +82,11 @@ def should_scrape_console(now: float, last_at: float | None, interval: float, bu
 
 class PS5Error(Exception):
     """Raised when a step of the start sequence fails."""
+
+
+class PS5Interrupted(PS5Error):
+    """The console changed under a running operation (rest mode, power off, another app started): not a failure to
+    show, the status should show what the console does now."""
 
 
 def parse_credentials(regist_key: str, morning: str) -> tuple[bytes, bytes]:
@@ -440,25 +447,32 @@ class PS5Client:
         except (OSError, ValueError):
             return None
 
-    def app_process_alive(self) -> bool | None:
-        """Whether the app's process (eboot.bin) runs, from the console exporter; None when that cannot be told.
+    def app_process_alive(self, title_id: str | None = None) -> bool | None:
+        """Whether the app itself runs, from the console exporter; None when that cannot be told.
 
-        The sandbox alone is not proof: it can outlive the app (after rest mode, or a close that left it behind), and
-        then a launch looks done at once while the app is not running. Only used while starting, since every exporter
-        read stalls the model for seconds."""
+        The sandbox alone is not proof: it outlives the app (after rest mode, or when another app was started from the
+        controller). The process name is no proof either, since every app's main process is called eboot.bin. What is
+        specific to the title is its private download0 filesystem, /mnt/sandbox/download/<title id>: the system mounts it
+        while the app runs and unmounts it when the app closes (measured on the console: mounted while PS5LM showed its
+        dashboard and while the model was ready, absent while another game ran). When the exporter's filesystem collector
+        did not report, the eboot.bin check is used as before. Every exporter read stalls a running model for seconds, so
+        callers only ask while the model is not answering."""
         if not self.console_metrics:
             return None
         text = self._get_text(f"http://{self.host}:{self.exporter_port}/metrics")
         if not text:
             return None
         m = parse_prometheus(text)
+        if first(m, "ps5_exporter_collector_success", collector="filesystems") == 1 and "ps5_filesystem_avail_bytes" in m:
+            mount = f"/mnt/sandbox/download/{title_id or self.title_id}"
+            return any(labels.get("mountpoint") == mount for labels, _ in m["ps5_filesystem_avail_bytes"])
         if "ps5_process_instances" not in m:  # an exporter without process metrics
             return None
         return bool(first(m, "ps5_process_instances", name="eboot.bin"))
 
     def app_started(self, title_id: str | None = None) -> bool:
         """The sandbox exists and the process runs (or the exporter cannot tell, then the sandbox decides)."""
-        return bool(self.app_running(title_id)) and self.app_process_alive() is not False
+        return bool(self.app_running(title_id)) and self.app_process_alive(title_id) is not False
 
     # -- actions -----------------------------------------------------------------------------------------------
     def wake(self) -> None:
@@ -496,8 +510,8 @@ class PS5Client:
         empty title closes the app and then fails harmlessly (a made-up title id would show a 'not found' dialog)."""
         if not self.websrv_up():
             raise PS5Error("websrv is not answering")
-        if not self.app_running():
-            return
+        if not self.app_started():
+            return  # PS5LM is not running; what runs (a game) is not ours to close
         self._http(f"http://{self.host}:{self.web_port}/launch?titleId=", timeout=20)
         if not self._wait(lambda: not self.app_started(), 30, step=1.0):
             raise PS5Error("PS5LM did not stop")
@@ -516,6 +530,31 @@ class PS5Client:
             if stop is None:
                 time.sleep(step)
         return False
+
+    def _wait_until_ready(self, ready: str, title: str) -> None:
+        """Wait for the ready URL, but follow the console meanwhile: if it goes to rest mode or off, or PS5LM is closed
+        (another app started from the controller), stop waiting at once. Each change must be seen twice in a row, 15 s
+        apart, so one lost discovery packet or a slow mount does not end a good start."""
+        end = time.monotonic() + READY_TIMEOUT
+        next_check = time.monotonic() + READY_CHECK_EVERY
+        gone: dict[str, int] = {"console": 0, "app": 0}
+        while True:
+            if self._http(ready) == 200:
+                return
+            now = time.monotonic()
+            if now >= end:
+                raise PS5Error(f"{ready} did not answer 200 within {READY_TIMEOUT} s")
+            if now >= next_check:
+                next_check = now + READY_CHECK_EVERY
+                state = self.state()
+                gone["console"] = gone["console"] + 1 if state != "ready" else 0
+                if gone["console"] >= 2:
+                    raise PS5Interrupted("the console went to rest mode or off while the model was loading")
+                alive = self.app_process_alive(title) if state == "ready" else None
+                gone["app"] = gone["app"] + 1 if alive is False else 0
+                if gone["app"] >= 2:
+                    raise PS5Interrupted("PS5LM was closed while the model was loading (another app was started)")
+            time.sleep(3)
 
     def start(self, title_id: str | None = None, ready_url: str | None = None, progress: Callable[[str], None] | None = None) -> dict[str, float]:
         """Wake the console if needed, sign the user in, launch the title, optionally wait for a URL. Returns step timings."""
@@ -564,7 +603,7 @@ class PS5Client:
                     if time.monotonic() - t_launch > 150:
                         raise PS5Error("PS5LM did not start within 150 s (no user signed in? wrong title id?)")
                     self.launch_once(title)
-                    self._wait(lambda: self.app_started(title), 6, step=1.0)
+                    self._wait(lambda: self.app_started(title), LAUNCH_SETTLE, step=2.0)
             finally:
                 stop.set()
             timings["launch"] = time.monotonic() - t_start
@@ -573,8 +612,7 @@ class PS5Client:
         if ready:
             say("waiting for the ready URL")
             # Counted from the moment the app really runs; a large model cold-started from rest mode needs a few minutes.
-            if not self._wait(lambda: self._http(ready) == 200, READY_TIMEOUT):
-                raise PS5Error(f"{ready} did not answer 200 within {READY_TIMEOUT} s")
+            self._wait_until_ready(ready, title)
             timings["ready"] = time.monotonic() - t_start
         timings["total"] = time.monotonic() - t_start
         say("done")
