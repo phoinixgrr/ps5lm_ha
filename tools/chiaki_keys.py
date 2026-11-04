@@ -39,8 +39,26 @@ def _qt_bytearray(value: str) -> bytes:
         elif nxt == "0":
             out.append(0); i += 2
         else:
-            out += {"n": b"\n", "r": b"\r", "t": b"\t", "\\": b"\\", '"': b'"'}.get(nxt, nxt.encode("latin-1")); i += 2
+            out += {"a": b"\a", "b": b"\b", "n": b"\n", "r": b"\r", "t": b"\t", "\\": b"\\", '"': b'"'}.get(nxt, nxt.encode("latin-1")); i += 2
     return bytes(out)
+
+
+def parse_qt_ini(text: str) -> dict[str, object]:
+    """Flatten a Qt INI file into plist-style keys, e.g. [registered_hosts] 1\\rp_key -> registered_hosts.1.rp_key."""
+    raw: dict[str, object] = {}
+    section = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            continue
+        if "=" in line:
+            key, value = line.split("=", 1)
+            key = key.replace("\\", ".")
+            if section and section != "General":
+                key = f"{section}.{key}"
+            raw[key] = _qt_bytearray(value) if value.startswith("@ByteArray") else value
+    return raw
 
 
 def hosts() -> list[dict[str, bytes | str]]:
@@ -51,10 +69,8 @@ def hosts() -> list[dict[str, bytes | str]]:
         conf = next((p for p in LINUX_CONF if os.path.exists(p)), None)
         if conf is None:
             sys.exit("chiaki-ng settings not found: register the console in chiaki-ng first")
-        for line in open(conf, encoding="utf-8", errors="replace"):
-            if "=" in line:
-                key, value = line.rstrip("\n").split("=", 1)
-                raw[key.replace("\\", ".")] = _qt_bytearray(value) if value.startswith("@ByteArray") else value
+        with open(conf, encoding="utf-8", errors="replace") as handle:
+            raw = parse_qt_ini(handle.read())
     found = []
     for n in range(1, int(raw.get("registered_hosts.size", 0) or 0) + 1):
         regist, morning = raw.get(f"registered_hosts.{n}.rp_regist_key"), raw.get(f"registered_hosts.{n}.rp_key")
