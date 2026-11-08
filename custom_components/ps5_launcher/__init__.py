@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -74,9 +75,11 @@ STEP_LABELS = {
     "launching the app": "Starting PS5LM",
     "app launched": "PS5LM started",
     "waiting for the ready URL": "Loading the model",
+    "waiting for the fleet worker": "Starting the fleet worker",
     "app already running": "PS5LM already running",
 }
 FAILURE_SHOWN_FOR = 300  # seconds a failed start or stop stays in the Status sensor
+CANCEL_WAIT = 20  # seconds a stop request waits for a start it cancelled to wind down
 REFRESH_ON = {"console awake", "app launched", "signed in via Remote Play", "done"}
 
 
@@ -96,6 +99,7 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
         self._model_last: dict[str, float | str] = {}
         self.switching_to: str | None = None  # the model a running switch is loading, so the sensors can name it
         self.op_lock = asyncio.Lock()
+        self.cancel_start = threading.Event()  # set by a stop or rest-mode request to end a start that is still waiting
         self.pending: str | None = None  # console_on, console_off, app_on, app_off while an operation runs
         self.step: str = ""
         self.last_result: str | None = None
@@ -117,8 +121,11 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
     async def _async_update_data(self) -> dict:
         state = await self.hass.async_add_executor_job(self.client.state)
         running = ready = None
+        worker = False
         if state == "ready":
             running, ready = await self._app_state()
+            if running:
+                worker = await self.hass.async_add_executor_job(self.client.fleet_worker) is not None
         # The console exporter is read rarely and not while the model is answering: each read stalls the model for seconds.
         busy = bool(((self.data or {}).get("metrics") or {}).get("requests_active"))
         scrape = state == "ready" and should_scrape_console(time.monotonic(), self._console_at, self.console_interval, busy)
@@ -135,7 +142,7 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
         fresh = {k: v for k, v in metrics.items() if k not in CONSOLE_KEYS}
         shown, self._model_last = model_metrics_to_show(fresh, self._model_last, bool(self.pending), self.switching_to)
         metrics = {**metrics, **shown}
-        return {"console": state or "off", "app_running": running, "app_ready": ready, "metrics": metrics}
+        return {"console": state or "off", "app_running": running, "app_ready": ready, "worker": worker, "metrics": metrics}
 
     # -- what the entities show -------------------------------------------------------------------------------------
     @property
@@ -152,6 +159,8 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
         if console != "ready":
             return "Off or unreachable"
         if data.get("app_running"):
+            if data.get("worker"):
+                return "Fleet worker ready" if data.get("app_ready") else "Starting the fleet worker"
             if self.client.ready_url:
                 return "Model ready" if data.get("app_ready") else "Loading the model"
             return "PS5LM running"
@@ -214,19 +223,37 @@ class PS5Coordinator(DataUpdateCoordinator[dict]):
         """Wake the console from rest mode and wait until it is awake. Does not start any app."""
         await self._operation("console_on", "Waking the console", lambda: self.hass.async_add_executor_job(self.client.wake_and_wait))
 
+    async def _cancel_pending_start(self) -> None:
+        """Rest mode and Stop end a start that is still waiting for the model or the worker. Without this they are
+        refused ("another PS5 operation is still running") for as long as that wait lasts, up to READY_TIMEOUT, which
+        is the one moment someone wants to stop it."""
+        if self.pending != "app_on":
+            return
+        self.cancel_start.set()
+        try:
+            async with asyncio.timeout(CANCEL_WAIT):
+                async with self.op_lock:  # the start releases it once its wait has ended
+                    pass
+        except TimeoutError as err:
+            raise HomeAssistantError("the start did not stop in time; try again in a moment") from err
+
     async def async_console_off(self) -> None:
         """Put the console in rest mode (this also ends the running app)."""
+        await self._cancel_pending_start()
         await self._operation("console_off", "Sending the console to rest mode", lambda: self.hass.async_add_executor_job(self.client.standby))
 
     async def async_app_on(self, title_id: str | None = None, ready_url: str | None = None) -> None:
         """Wake the console if needed, sign in, start PS5LM and wait for the model if a health URL is set."""
+        if not self.op_lock.locked():
+            self.cancel_start.clear()
         await self._operation(
             "app_on", "Starting",
-            lambda: self.hass.async_add_executor_job(self.client.start, title_id, ready_url, self._progress),
+            lambda: self.hass.async_add_executor_job(self.client.start, title_id, ready_url, self._progress, self.cancel_start),
         )
 
     async def async_app_off(self) -> None:
         """Close the running app. The console stays on."""
+        await self._cancel_pending_start()
         await self._operation("app_off", "Stopping PS5LM", lambda: self.hass.async_add_executor_job(self.client.stop_app))
 
 

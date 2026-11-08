@@ -76,8 +76,8 @@ Everything except the host can be changed later under **Configure**.
 |---|---|
 | **Console** switch | on = awake, off = rest mode |
 | **Server** switch | on = start PS5LM (wakes the console if needed), off = stop PS5LM |
-| **Status** | Rest mode, Waking the console, Signing in, Starting PS5LM, Loading the model, Model ready, ... |
-| **Model ready** | PS5LM answers its health check |
+| **Status** | Rest mode, Waking the console, Signing in, Starting PS5LM, Loading the model, Model ready, Starting the fleet worker, Fleet worker ready, ... |
+| **Model ready** | PS5LM answers its health check. Always off for a [fleet worker](#fleet-worker-mode), which has no model API |
 | **Model** select | the models on the console; picking one restarts PS5LM with it (about 2 minutes) |
 | Model metrics | model, context size, generation and prompt speed, active and queued requests, token counters, prompt cache hit rate |
 | Console metrics | CPU and SoC temperature, fan speed, PS5LM memory, uptime, free space |
@@ -234,6 +234,18 @@ Stops PS5LM if the hottest SoC sensor stays above 85 °C, and tells you.
       data:
         message: "PS5LM: {{ trigger.to_state.attributes.last_result }}"
 ```
+
+## Fleet worker mode
+
+PS5LM v0.11 can run as an RPC worker for another machine's llama.cpp ([fleet docs](https://github.com/cobanov/PS5LM/blob/main/docs/FLEET.md)): put `/data/PS5LM/fleet-worker.txt` on the console and the app serves no model API at all, only an RPC endpoint (the file's first line, `ip:port`). The integration reads that file and adapts:
+
+- A start is ready when the RPC endpoint accepts a connection, not when `/health` answers (it never does). Status goes Starting the fleet worker, then Fleet worker ready.
+- **Model ready** stays off, so automations that treat it as "the model API can be used or closed" (an idle rest mode, a job stop) leave a worker alone.
+- The **Model** dropdown refuses to switch, with a message: a worker has no model of its own. Delete `fleet-worker.txt` and restart PS5LM to go back to a normal server.
+- A `fleet-worker.txt` without a valid `ip:port` first line fails the start at once instead of waiting 7 minutes.
+- Stop and Rest mode cancel a start that is still waiting for the model or the worker, instead of being refused until its 7 minute timeout ends.
+
+An unauthenticated RPC port is probed (a plain TCP connect, no data) while a worker runs, about once per scan. Keep workers on a trusted network, as the fleet docs require.
 
 ## Notes
 

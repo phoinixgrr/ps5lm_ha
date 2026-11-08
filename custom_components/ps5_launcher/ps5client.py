@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -61,6 +62,12 @@ ARGS_NAME = "app-args.txt"
 ARGS_FILE = f"{ARGS_DIR}/{ARGS_NAME}"
 FILE_MANAGER_PORT = 8888
 
+# PS5LM v0.11 can run as a fleet (RPC) worker for another machine's llama.cpp: when this file exists the app serves
+# no model API at all, so there is no /health to wait for. Its first line is the RPC endpoint ("ip:port"), the second
+# the worker's acknowledgement. Deleting the file and restarting the app is how PS5LM goes back to a normal server.
+FLEET_WORKER_FILE = f"{ARGS_DIR}/fleet-worker.txt"
+FLEET_CHECK_EVERY = 60  # seconds a read of that file is reused by the polling (a start always reads it again)
+
 # For a model with no profile: a context and cache small enough that most models which fit at all will start.
 FALLBACK_CONTEXT = "8192"
 FALLBACK_CACHE = "q4_0"
@@ -69,6 +76,19 @@ FALLBACK_ARGS = [
     "-fa", "on", "-ctk", FALLBACK_CACHE, "-ctv", FALLBACK_CACHE, "-np", "1", "--host", "0.0.0.0", "--port", "8081",
     "--metrics", "--tools", "read_file,write_file,edit_file,file_glob_search,grep_search,get_info",
 ]
+
+
+def parse_fleet_endpoint(text: str) -> tuple[str, int] | None:
+    """The RPC endpoint in fleet-worker.txt's first line, "ip:port", or None when it is not one the app would accept."""
+    lines = text.strip().splitlines()
+    host, sep, port = lines[0].strip().rpartition(":") if lines else ("", "", "")
+    if not sep or not port.isdigit() or not 0 < int(port) < 65536:
+        return None
+    try:
+        ipaddress.IPv4Address(host)
+    except ValueError:
+        return None
+    return host, int(port)
 
 
 def should_scrape_console(now: float, last_at: float | None, interval: float, busy: bool) -> bool:
@@ -335,6 +355,8 @@ class PS5Client:
         self.console_metrics = console_metrics
         self._counters: dict[str, tuple[float, float]] = {}
         self._last_speed: dict[str, float] = {}
+        self._fleet_text: str | None = None
+        self._fleet_at: float | None = None
 
     # -- reads -------------------------------------------------------------------------------------------------
     def state(self) -> str | None:
@@ -349,8 +371,33 @@ class PS5Client:
         except (OSError, ValueError):
             return None
 
+    @staticmethod
+    def _tcp_open(host: str, port: int, timeout: float = 3.0) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
+    def fleet_worker(self, fresh: bool = False) -> str | None:
+        """The text of fleet-worker.txt when PS5LM is set up as a fleet worker, None when it is a normal model server.
+
+        The answer is reused for FLEET_CHECK_EVERY seconds so the polling adds no request per scan; `fresh` reads it
+        again. A console that does not answer counts as "not a worker", which keeps the old behaviour (wait for the
+        model server).
+        """
+        now = time.monotonic()
+        if fresh or self._fleet_at is None or now - self._fleet_at >= FLEET_CHECK_EVERY:
+            self._fleet_text = self.read_console_file(FLEET_WORKER_FILE)
+            self._fleet_at = now
+        return self._fleet_text
+
     def is_ready(self) -> bool:
-        """True when the optional ready URL (for example the model server's /health) answers 200."""
+        """True when the model server's ready URL (for example /health) answers 200, or, for a fleet worker, when its
+        RPC endpoint accepts a connection (a worker has no model API, so /health never answers)."""
+        if (fleet := self.fleet_worker()) is not None:
+            endpoint = parse_fleet_endpoint(fleet)
+            return endpoint is not None and self._tcp_open(*endpoint)
         return bool(self.ready_url) and self._http(self.ready_url, timeout=3) == 200
 
     @property
@@ -531,19 +578,33 @@ class PS5Client:
                 time.sleep(step)
         return False
 
-    def _wait_until_ready(self, ready: str, title: str) -> None:
+    def _wait_until_ready(self, ready: str, title: str, cancel: threading.Event | None = None) -> None:
         """Wait for the ready URL, but follow the console meanwhile: if it goes to rest mode or off, or PS5LM is closed
         (another app started from the controller), stop waiting at once. Each change must be seen twice in a row, 15 s
-        apart, so one lost discovery packet or a slow mount does not end a good start."""
+        apart, so one lost discovery packet or a slow mount does not end a good start.
+
+        A fleet worker has no model API: it is ready when its RPC endpoint accepts a connection. `cancel` ends the wait
+        at once, so a stop request does not have to sit out the timeout."""
+        if (fleet := self.fleet_worker(fresh=True)) is not None:
+            endpoint = parse_fleet_endpoint(fleet)
+            if endpoint is None:
+                raise PS5Error(f"{FLEET_WORKER_FILE} has no valid ip:port on its first line, so the worker cannot start (delete it for a normal model server)")
+            is_up: Callable[[], bool] = lambda: self._tcp_open(*endpoint)  # noqa: E731
+            waiting_for = f"the fleet worker at {endpoint[0]}:{endpoint[1]} did not accept a connection"
+        else:
+            is_up = lambda: self._http(ready) == 200  # noqa: E731
+            waiting_for = f"{ready} did not answer 200"
         end = time.monotonic() + READY_TIMEOUT
         next_check = time.monotonic() + READY_CHECK_EVERY
         gone: dict[str, int] = {"console": 0, "app": 0}
         while True:
-            if self._http(ready) == 200:
+            if cancel is not None and cancel.is_set():
+                raise PS5Interrupted("the start was cancelled while waiting for PS5LM")
+            if is_up():
                 return
             now = time.monotonic()
             if now >= end:
-                raise PS5Error(f"{ready} did not answer 200 within {READY_TIMEOUT} s")
+                raise PS5Error(f"{waiting_for} within {READY_TIMEOUT} s")
             if now >= next_check:
                 next_check = now + READY_CHECK_EVERY
                 state = self.state()
@@ -554,10 +615,16 @@ class PS5Client:
                 gone["app"] = gone["app"] + 1 if alive is False else 0
                 if gone["app"] >= 2:
                     raise PS5Interrupted("PS5LM was closed while the model was loading (another app was started)")
-            time.sleep(3)
+            if cancel is not None:
+                cancel.wait(3)
+            else:
+                time.sleep(3)
 
-    def start(self, title_id: str | None = None, ready_url: str | None = None, progress: Callable[[str], None] | None = None) -> dict[str, float]:
-        """Wake the console if needed, sign the user in, launch the title, optionally wait for a URL. Returns step timings."""
+    def start(self, title_id: str | None = None, ready_url: str | None = None, progress: Callable[[str], None] | None = None,
+              cancel: threading.Event | None = None) -> dict[str, float]:
+        """Wake the console if needed, sign the user in, launch the title, optionally wait for a URL. Returns step timings.
+
+        `cancel`, once set, ends the launch loop and the wait for the model or worker with PS5Interrupted."""
         title = title_id or self.title_id
         ready = self.ready_url if ready_url is None else ready_url
         say = progress or (lambda message: _LOGGER.debug("%s", message))
@@ -600,6 +667,8 @@ class PS5Client:
             say("launching the app")
             try:
                 while not self.app_started(title):
+                    if cancel is not None and cancel.is_set():
+                        raise PS5Interrupted("the start was cancelled while launching PS5LM")
                     if time.monotonic() - t_launch > 150:
                         raise PS5Error("PS5LM did not start within 150 s (no user signed in? wrong title id?)")
                     self.launch_once(title)
@@ -610,9 +679,9 @@ class PS5Client:
             say("app launched")
 
         if ready:
-            say("waiting for the ready URL")
             # Counted from the moment the app really runs; a large model cold-started from rest mode needs a few minutes.
-            self._wait_until_ready(ready, title)
+            say("waiting for the fleet worker" if self.fleet_worker(fresh=True) is not None else "waiting for the ready URL")
+            self._wait_until_ready(ready, title, cancel)
             timings["ready"] = time.monotonic() - t_start
         timings["total"] = time.monotonic() - t_start
         say("done")

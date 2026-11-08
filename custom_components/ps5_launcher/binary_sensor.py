@@ -22,4 +22,7 @@ class PS5AppReady(PS5Entity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        return bool(self.coordinator.data and self.coordinator.data.get("app_ready"))
+        data = self.coordinator.data or {}
+        # A fleet worker answers on its RPC port but has no model: this stays off for it, because automations read it
+        # as "the model API can be used, and may be closed when the job is done" (the idle rest mode, a job stop).
+        return bool(data.get("app_ready")) and not data.get("worker")

@@ -90,6 +90,13 @@ class PS5ModelSelect(PS5Entity, SelectEntity):
             raise HomeAssistantError("The console is off or unreachable")
 
         client = self.coordinator.client
+        # A fleet worker serves no model of its own, so there is nothing to switch: writing app-args.txt and restarting
+        # would only report a start that loads nothing.
+        if await self.hass.async_add_executor_job(client.fleet_worker, True) is not None:
+            raise HomeAssistantError(
+                "PS5LM is set up as a fleet worker (fleet-worker.txt on the console), so it serves no model of its own. "
+                "Delete that file and restart PS5LM to choose a model here."
+            )
         file_name = f"{option}.gguf"
 
         async def switch() -> None:
